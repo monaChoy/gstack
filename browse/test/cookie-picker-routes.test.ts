@@ -6,8 +6,18 @@
  * CORS headers, and JSON response formats.
  */
 
-import { describe, test, expect } from 'bun:test';
-import { handleCookiePickerRoute, generatePickerCode } from '../src/cookie-picker-routes';
+import { afterAll, describe, test, expect } from 'bun:test';
+import { handleCookiePickerRoute, generatePickerCode, hasActivePicker } from '../src/cookie-picker-routes';
+
+afterAll(() => {
+  const realNow = Date.now;
+  Date.now = () => realNow() + 3_700_000;
+  try {
+    expect(hasActivePicker()).toBe(false);
+  } finally {
+    Date.now = realNow;
+  }
+});
 
 // ─── Mock BrowserManager ──────────────────────────────────────
 
@@ -284,6 +294,57 @@ describe('cookie-picker-routes', () => {
     });
   });
 
+  describe('active picker tracking', () => {
+    test('one-time codes keep the picker active until consumed', async () => {
+      const realNow = Date.now;
+      Date.now = () => realNow() + 3_700_000;
+      try {
+        expect(hasActivePicker()).toBe(false); // clears any stale state from prior tests
+      } finally {
+        Date.now = realNow;
+      }
+
+      const { bm } = mockBrowserManager();
+      const code = generatePickerCode();
+      expect(hasActivePicker()).toBe(true);
+
+      const res = await handleCookiePickerRoute(
+        makeUrl(`/cookie-picker?code=${code}`),
+        new Request('http://127.0.0.1:9470', { method: 'GET' }),
+        bm,
+        'test-token',
+      );
+
+      expect(res.status).toBe(302);
+      expect(hasActivePicker()).toBe(true); // session is now active
+    });
+
+    test('picker becomes inactive after an invalid session probe clears expired state', async () => {
+      const { bm } = mockBrowserManager();
+      const session = await getSessionCookie(bm, 'test-token');
+      expect(hasActivePicker()).toBe(true);
+
+      const realNow = Date.now;
+      Date.now = () => realNow() + 3_700_000;
+      try {
+        const res = await handleCookiePickerRoute(
+          makeUrl('/cookie-picker'),
+          new Request('http://127.0.0.1:9470', {
+            method: 'GET',
+            headers: { 'Cookie': `gstack_picker=${session}` },
+          }),
+          bm,
+          'test-token',
+        );
+
+        expect(res.status).toBe(403);
+        expect(hasActivePicker()).toBe(false);
+      } finally {
+        Date.now = realNow;
+      }
+    });
+  });
+
   describe('session cookie auth', () => {
     test('valid session cookie grants HTML access', async () => {
       const { bm } = mockBrowserManager();
@@ -317,16 +378,20 @@ describe('cookie-picker-routes', () => {
 
       expect(html).not.toContain(authToken);
       expect(html).not.toContain('AUTH_TOKEN');
+      expect(html).not.toContain(session);
     });
 
     test('data routes accept session cookie', async () => {
       const { bm } = mockBrowserManager();
       const session = await getSessionCookie(bm, 'test-token');
+      const document = await handleCookiePickerRoute(makeUrl('/cookie-picker'), makeReq('GET', undefined, { Cookie: `gstack_picker=${session}` }), bm, 'test-token');
+      const html = await document.text();
+      const { pickerInstance } = JSON.parse(html.match(/<script id="picker-config" type="application\/json">(.*?)<\/script>/s)![1]);
 
       const url = makeUrl('/cookie-picker/browsers');
       const req = new Request('http://127.0.0.1:9470', {
         method: 'GET',
-        headers: { 'Cookie': `gstack_picker=${session}` },
+        headers: { 'Cookie': `gstack_picker=${session}`, 'X-Gstack-Picker-Instance': pickerInstance },
       });
 
       const res = await handleCookiePickerRoute(url, req, bm, 'test-token');

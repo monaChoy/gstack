@@ -8,9 +8,10 @@
 
 import fs from "fs";
 import path from "path";
+import { openaiUrl } from "./src/auth";
+import { receiptedFetch } from "./src/receipted-fetch";
 
-const API_KEY = process.env.OPENAI_API_KEY
-  || JSON.parse(fs.readFileSync(path.join(process.env.HOME!, ".gstack/openai.json"), "utf-8")).api_key;
+const API_KEY = process.env.OPENAI_API_KEY;
 
 if (!API_KEY) {
   console.error("No API key found. Set OPENAI_API_KEY or save to ~/.gstack/openai.json");
@@ -45,7 +46,7 @@ async function generateMockup(brief: { name: string; prompt: string }) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 120_000); // 2 min timeout
 
-  const response = await fetch("https://api.openai.com/v1/responses", {
+  const response = await receiptedFetch("prototype-image-request", openaiUrl("responses"), {
     method: "POST",
     headers: {
       "Authorization": `Bearer ${API_KEY}`,
@@ -85,7 +86,8 @@ async function generateMockup(brief: { name: string; prompt: string }) {
     return null;
   }
 
-  const outputPath = path.join(OUTPUT_DIR, `${brief.name}.png`);
+  const safeName = brief.name.replace(/[^a-zA-Z0-9_-]/g, "_");
+  const outputPath = OUTPUT_DIR + "/" + safeName + ".png";
   const imageBuffer = Buffer.from(imageItem.result, "base64");
   fs.writeFileSync(outputPath, imageBuffer);
 
@@ -109,7 +111,7 @@ async function main() {
       const resultPath = await generateMockup(brief);
       results.push({ name: brief.name, path: resultPath });
     } catch (err) {
-      console.error(`ERROR generating ${brief.name}:`, err);
+      console.error("ERROR generating:", brief.name, err);
       results.push({ name: brief.name, path: null });
     }
   }
@@ -124,7 +126,7 @@ async function main() {
   console.log(`${succeeded.length}/${results.length} generated successfully`);
 
   if (failed.length > 0) {
-    console.log(`Failed: ${failed.map(f => f.name).join(", ")}`);
+    console.log("Failed:", failed.map(f => f.name).join(", "));
   }
 
   if (succeeded.length > 0) {

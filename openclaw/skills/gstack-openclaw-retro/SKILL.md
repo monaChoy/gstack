@@ -1,8 +1,6 @@
 ---
 name: gstack-openclaw-retro
-description: Weekly engineering retrospective. Analyzes commit history, work patterns, and code quality metrics with persistent history and trend tracking. Team-aware with per-person contributions, praise, and growth areas. Use when asked for weekly retro, what shipped this week, or engineering retrospective.
-version: 1.0.0
-metadata: { "openclaw": { "emoji": "📊" } }
+description: "Weekly engineering retrospective. Analyzes commit history, work patterns, and code quality metrics with persistent history and trend tracking. Team-aware with per-person contributions, praise, and growth areas. Use when asked for weekly retro, what shipped this week, or engineering retrospective."
 ---
 
 # Weekly Engineering Retrospective
@@ -62,7 +60,7 @@ git log origin/main --since="<window>" --format="AUTHOR:%aN" --name-only
 git shortlog origin/main --since="<window>" -sn --no-merges
 
 # Test file count
-find . -name '*.test.*' -o -name '*.spec.*' -o -name '*_test.*' -o -name '*_spec.*' 2>/dev/null | grep -v node_modules | wc -l
+git ls-files 2>/dev/null | grep -E '(\.test\.|\.spec\.|_test\.|_spec\.)' | wc -l
 
 # Test files changed in window
 git log origin/main --since="<window>" --format="" --name-only | grep -E '\.(test|spec)\.' | sort -u | wc -l

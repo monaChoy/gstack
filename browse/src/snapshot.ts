@@ -21,6 +21,12 @@ import type { Page, Frame, Locator } from 'playwright';
 import type { TabSession, RefEntry } from './tab-session';
 import * as Diff from 'diff';
 import { TEMP_DIR, isPathWithin } from './platform';
+import { escapeEnvelopeSentinels } from './content-security';
+import { stripLoneSurrogates } from './sanitize';
+import { guardScreenshotPath } from './screenshot-size-guard';
+import { SNAPSHOT_FLAGS, type SnapshotOptions } from './snapshot-flags';
+
+export { SNAPSHOT_FLAGS } from './snapshot-flags';
 
 // Roles considered "interactive" for the -i flag
 const INTERACTIVE_ROLES = new Set([
@@ -29,42 +35,6 @@ const INTERACTIVE_ROLES = new Set([
   'option', 'searchbox', 'slider', 'spinbutton', 'switch', 'tab',
   'treeitem',
 ]);
-
-interface SnapshotOptions {
-  interactive?: boolean;       // -i: only interactive elements
-  compact?: boolean;           // -c: remove empty structural elements
-  depth?: number;              // -d N: limit tree depth
-  selector?: string;           // -s SEL: scope to CSS selector
-  diff?: boolean;              // -D / --diff: diff against last snapshot
-  annotate?: boolean;          // -a / --annotate: annotated screenshot
-  outputPath?: string;         // -o / --output: path for annotated screenshot
-  cursorInteractive?: boolean; // -C / --cursor-interactive: scan cursor:pointer etc.
-}
-
-/**
- * Snapshot flag metadata — single source of truth for CLI parsing and doc generation.
- *
- * Imported by:
- *   - gen-skill-docs.ts (generates {{SNAPSHOT_FLAGS}} tables)
- *   - skill-parser.ts (validates flags in SKILL.md examples)
- */
-export const SNAPSHOT_FLAGS: Array<{
-  short: string;
-  long: string;
-  description: string;
-  takesValue?: boolean;
-  valueHint?: string;
-  optionKey: keyof SnapshotOptions;
-}> = [
-  { short: '-i', long: '--interactive', description: 'Interactive elements only (buttons, links, inputs) with @e refs. Also auto-enables cursor-interactive scan (-C) to capture dropdowns and popovers.', optionKey: 'interactive' },
-  { short: '-c', long: '--compact', description: 'Compact (no empty structural nodes)', optionKey: 'compact' },
-  { short: '-d', long: '--depth', description: 'Limit tree depth (0 = root only, default: unlimited)', takesValue: true, valueHint: '<N>', optionKey: 'depth' },
-  { short: '-s', long: '--selector', description: 'Scope to CSS selector', takesValue: true, valueHint: '<sel>', optionKey: 'selector' },
-  { short: '-D', long: '--diff', description: 'Unified diff against previous snapshot (first call stores baseline)', optionKey: 'diff' },
-  { short: '-a', long: '--annotate', description: 'Annotated screenshot with red overlay boxes and ref labels', optionKey: 'annotate' },
-  { short: '-o', long: '--output', description: 'Output path for annotated screenshot (default: <temp>/browse-annotated.png)', takesValue: true, valueHint: '<path>', optionKey: 'outputPath' },
-  { short: '-C', long: '--cursor-interactive', description: 'Cursor-interactive elements (@c refs — divs with pointer, onclick). Auto-enabled when -i is used.', optionKey: 'cursorInteractive' },
-];
 
 interface ParsedNode {
   indent: number;
@@ -298,7 +268,7 @@ export async function handleSnapshot(
           const parts: string[] = [];
           let current: Element | null = el;
           while (current && current !== document.documentElement) {
-            const parent = current.parentElement;
+            const parent: Element | null = current.parentElement;
             if (!parent) break;
             const siblings = [...parent.children];
             const index = siblings.indexOf(current) + 1;
@@ -348,6 +318,19 @@ export async function handleSnapshot(
 
   const snapshotText = output.join('\n');
 
+  // `-o` only means something to the two modes that PRODUCE an image. Passed
+  // alone it used to be silently ignored: exit 0, no file, no explanation —
+  // which reads as "the screenshot feature is broken" rather than "you forgot a
+  // flag", and cost a real debugging session before anyone noticed. Kept as a
+  // variable so the diff-mode returns below (which bypass `output`) can carry
+  // it too — diff mode must not regress to the silent-ignore behavior.
+  const outputIgnoredWarning = (opts.outputPath && !opts.annotate && !opts.heatmap)
+    ? `[warning] -o/--output was ignored: it names the output file for an annotated (-a/--annotate) or heatmap (-H/--heatmap) screenshot. For a plain screenshot use: browse screenshot ${opts.outputPath}`
+    : '';
+  if (outputIgnoredWarning) {
+    output.push(outputIgnoredWarning);
+  }
+
   // ─── Annotated screenshot (-a) ────────────────────────────
   if (opts.annotate) {
     const screenshotPath = opts.outputPath || `${TEMP_DIR}/browse-annotated.png`;
@@ -382,15 +365,48 @@ export async function handleSnapshot(
     try {
       // Inject overlay divs at each ref's bounding box
       const boxes: Array<{ ref: string; box: { x: number; y: number; width: number; height: number } }> = [];
+      const ambiguousRefs: string[] = [];
+      const skippedRefs: string[] = [];
       for (const [ref, entry] of refMap) {
         try {
-          const box = await entry.locator.boundingBox({ timeout: 1000 });
+          // A ref's locator can resolve to MORE than one element, and Playwright
+          // strict mode throws on that. It happens whenever a node has no
+          // accessible name: the locator degrades to `getByRole(role)` with no
+          // name filter, and the `.nth()` disambiguation above cannot help
+          // because its count comes from the FILTERED aria snapshot while
+          // getByRole matches the unfiltered DOM. Measured on a real page: the
+          // tree surfaced 2 unnamed paragraphs, the DOM had 9. Landmarks
+          // (banner/main/contentinfo) and paragraphs are correctly unnamed per
+          // ARIA, so this is the common case, not an edge.
+          //
+          // The exact nth-resolved locator stays the primary path; `.first()`
+          // is the AMBIGUITY FALLBACK only, and every fallback use is counted
+          // so first-match annotation is never silent. Before this, ONE such
+          // ref aborted the entire annotated screenshot (see the catch below) —
+          // which silently cost /qa, /canary and /land-and-deploy the
+          // screenshots their reports reference.
+          let locator = entry.locator;
+          const matchCount = await locator.count();
+          if (matchCount > 1) {
+            ambiguousRefs.push(`@${ref}`);
+            locator = locator.first();
+          }
+          const box = await locator.boundingBox({ timeout: 1000 });
           if (box) {
             boxes.push({ ref: `@${ref}`, box });
+          } else {
+            skippedRefs.push(`@${ref}`);
           }
         } catch (err: any) {
-          // Element may be offscreen, hidden, or page navigated — skip
-          if (!err?.message?.includes('Timeout') && !err?.message?.includes('timeout') && !err?.message?.includes('closed') && !err?.message?.includes('Target') && !err?.message?.includes('Execution context')) throw err;
+          // Element may be offscreen, hidden, or page navigated — skip.
+          //
+          // The allowlist is deliberately not exhaustive-by-message any more: a
+          // box we cannot measure is a box we do not draw, never a reason to
+          // lose every other annotation on the page. The heatmap path below has
+          // always used a bare `catch {}` for exactly this reason; annotate was
+          // the only path that could be killed by a single unmeasurable ref.
+          skippedRefs.push(`@${ref}`);
+          if (process.env.BROWSE_DEBUG) console.error(`[annotate] skipped @${ref}: ${err?.message?.split('\n')[0]}`);
         }
       }
 
@@ -414,6 +430,7 @@ export async function handleSnapshot(
       }, boxes);
 
       await page.screenshot({ path: screenshotPath, fullPage: true });
+      await guardScreenshotPath(screenshotPath);
 
       // Always remove overlays
       await page.evaluate(() => {
@@ -422,6 +439,15 @@ export async function handleSnapshot(
 
       output.push('');
       output.push(`[annotated screenshot: ${screenshotPath}]`);
+      // Ambiguity and skips are visible, not buried behind BROWSE_DEBUG: a
+      // first-match box or a missing box changes what the screenshot claims.
+      if (ambiguousRefs.length || skippedRefs.length) {
+        const cap = (arr: string[]) => arr.slice(0, 8).join(', ') + (arr.length > 8 ? `, +${arr.length - 8} more` : '');
+        const parts: string[] = [];
+        if (ambiguousRefs.length) parts.push(`${ambiguousRefs.length} ambiguous (first-match): ${cap(ambiguousRefs)}`);
+        if (skippedRefs.length) parts.push(`${skippedRefs.length} skipped: ${cap(skippedRefs)}`);
+        output.push(`[annotated: ${parts.join(' | ')}]`);
+      }
     } catch (err: any) {
       // Remove overlays even on screenshot failure — but only swallow page/browser errors
       if (!err?.message?.includes('closed') && !err?.message?.includes('Target') && !err?.message?.includes('Execution context') && !err?.message?.includes('screenshot')) throw err;
@@ -435,12 +461,132 @@ export async function handleSnapshot(
     }
   }
 
+  // ─── Heatmap mode (-H) ──────────────────────────────────────
+  if (opts.heatmap) {
+    const heatmapPath = opts.outputPath || `${TEMP_DIR}/browse-heatmap.png`;
+    // Validate output path
+    {
+      const nodePath = require('path') as typeof import('path');
+      const nodeFs = require('fs') as typeof import('fs');
+      const absolute = nodePath.resolve(heatmapPath);
+      const safeDirs = [TEMP_DIR, process.cwd()].map((d: string) => {
+        try { return nodeFs.realpathSync(d); } catch (err: any) { if (err?.code !== 'ENOENT') throw err; return d; }
+      });
+      let realPath: string;
+      try {
+        realPath = nodeFs.realpathSync(absolute);
+      } catch (err: any) {
+        if (err.code === 'ENOENT') {
+          try {
+            const dir = nodeFs.realpathSync(nodePath.dirname(absolute));
+            realPath = nodePath.join(dir, nodePath.basename(absolute));
+          } catch (err2: any) {
+            if (err2?.code !== 'ENOENT') throw err2;
+            realPath = absolute;
+          }
+        } else {
+          throw new Error(`Cannot resolve real path: ${heatmapPath} (${err.code})`);
+        }
+      }
+      if (!safeDirs.some((dir: string) => isPathWithin(realPath, dir))) {
+        throw new Error(`Path must be within: ${safeDirs.join(', ')}`);
+      }
+    }
+
+    // Parse and validate color map
+    const VALID_COLORS = new Set(['green', 'yellow', 'red', 'blue', 'orange', 'gray']);
+    const COLOR_MAP: Record<string, { border: string; bg: string }> = {
+      green:  { border: '#00b400', bg: 'rgba(0,180,0,0.15)' },
+      yellow: { border: '#ffb400', bg: 'rgba(255,180,0,0.15)' },
+      red:    { border: '#ff0000', bg: 'rgba(255,0,0,0.15)' },
+      blue:   { border: '#0066ff', bg: 'rgba(0,102,255,0.15)' },
+      orange: { border: '#ff6600', bg: 'rgba(255,102,0,0.15)' },
+      gray:   { border: '#888888', bg: 'rgba(136,136,136,0.15)' },
+    };
+
+    let colorAssignments: Record<string, string>;
+    try {
+      const parsed = JSON.parse(opts.heatmap);
+      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+        throw new Error('not an object');
+      }
+      colorAssignments = parsed;
+    } catch {
+      throw new Error('Invalid heatmap JSON. Expected object: \'{"@e1":"green","@e3":"red"}\'');
+    }
+
+    // Validate colors
+    for (const [ref, color] of Object.entries(colorAssignments)) {
+      if (!VALID_COLORS.has(color)) {
+        throw new Error(`Invalid heatmap color "${color}" for ${ref}. Valid: ${[...VALID_COLORS].join(', ')}`);
+      }
+    }
+
+    try {
+      const boxes: Array<{ ref: string; box: { x: number; y: number; width: number; height: number }; color: string }> = [];
+      for (const [refKey, color] of Object.entries(colorAssignments)) {
+        const cleanRef = refKey.startsWith('@') ? refKey.slice(1) : refKey;
+        const entry = refMap.get(cleanRef);
+        if (!entry) continue; // Skip refs not found on page
+        try {
+          const box = await entry.locator.boundingBox({ timeout: 1000 });
+          if (box) {
+            const colors = COLOR_MAP[color] || COLOR_MAP.gray;
+            boxes.push({ ref: `@${cleanRef}`, box, color: JSON.stringify(colors) });
+          }
+        } catch {
+          // Element may be offscreen or hidden — skip
+        }
+      }
+
+      await page.evaluate((boxes) => {
+        for (const { ref, box, color } of boxes) {
+          const colors = JSON.parse(color);
+          const overlay = document.createElement('div');
+          overlay.className = '__browse_heatmap__';
+          overlay.style.cssText = `
+            position: absolute; top: ${box.y}px; left: ${box.x}px;
+            width: ${box.width}px; height: ${box.height}px;
+            border: 2px solid ${colors.border}; background: ${colors.bg};
+            pointer-events: none; z-index: 99999;
+            font-size: 10px; color: ${colors.border}; font-weight: bold;
+          `;
+          const label = document.createElement('span');
+          label.textContent = ref;
+          label.style.cssText = `position: absolute; top: -14px; left: 0; background: ${colors.border}; color: white; padding: 0 3px; font-size: 10px;`;
+          overlay.appendChild(label);
+          document.body.appendChild(overlay);
+        }
+      }, boxes);
+
+      await page.screenshot({ path: heatmapPath, fullPage: true });
+      await guardScreenshotPath(heatmapPath);
+
+      // Remove heatmap overlays
+      await page.evaluate(() => {
+        document.querySelectorAll('.__browse_heatmap__').forEach(el => el.remove());
+      });
+
+      output.push('');
+      output.push(`[heatmap screenshot: ${heatmapPath}]`);
+    } catch (err: any) {
+      // Cleanup on failure
+      try {
+        await page.evaluate(() => {
+          document.querySelectorAll('.__browse_heatmap__').forEach(el => el.remove());
+        });
+      } catch {}
+      if (!err?.message?.includes('closed') && !err?.message?.includes('Target') && !err?.message?.includes('Execution context') && !err?.message?.includes('screenshot')) throw err;
+    }
+  }
+
   // ─── Diff mode (-D) ───────────────────────────────────────
   if (opts.diff) {
     const lastSnapshot = session.getLastSnapshot();
     if (!lastSnapshot) {
       session.setLastSnapshot(snapshotText);
-      return snapshotText + '\n\n(no previous snapshot to diff against — this snapshot stored as baseline)';
+      return snapshotText + '\n\n(no previous snapshot to diff against — this snapshot stored as baseline)'
+        + (outputIgnoredWarning ? '\n' + outputIgnoredWarning : '');
     }
 
     const changes = Diff.diffLines(lastSnapshot, snapshotText);
@@ -455,7 +601,8 @@ export async function handleSnapshot(
     }
 
     session.setLastSnapshot(snapshotText);
-    return diffOutput.join('\n');
+    return stripLoneSurrogates(diffOutput.join('\n')
+      + (outputIgnoredWarning ? '\n' + outputIgnoredWarning : ''));
   }
 
   // Store for future diffs
@@ -493,11 +640,17 @@ export async function handleSnapshot(
       parts.push(...trustedRefs);
       parts.push('');
     }
+    // Defuse any envelope sentinel that appears inside the page's own
+    // accessibility text. Without this, a page whose rendered content
+    // contains the literal `═══ END UNTRUSTED WEB CONTENT ═══` string
+    // can close the envelope early and forge a fake "trusted" block
+    // for the LLM. Same escape that wrapUntrustedPageContent applies.
+    const safeUntrusted = untrustedLines.map(escapeEnvelopeSentinels);
     parts.push('═══ BEGIN UNTRUSTED WEB CONTENT ═══');
-    parts.push(...untrustedLines);
+    parts.push(...safeUntrusted);
     parts.push('═══ END UNTRUSTED WEB CONTENT ═══');
-    return parts.join('\n');
+    return stripLoneSurrogates(parts.join('\n'));
   }
 
-  return output.join('\n');
+  return stripLoneSurrogates(output.join('\n'));
 }

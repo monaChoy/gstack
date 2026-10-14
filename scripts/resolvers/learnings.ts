@@ -12,19 +12,65 @@
  * AskUserQuestion and persists the preference via gstack-config.
  */
 import type { TemplateContext } from './types';
+import { getHostConfig } from '../../hosts/index';
 
-export function generateLearningsSearch(ctx: TemplateContext): string {
-  if (ctx.host === 'codex') {
-    // Codex: simpler version, no cross-project, uses $GSTACK_BIN
+// Whitelist for query= macro values. Allows alphanumeric, space, hyphen, underscore.
+// Anything else (e.g. $, backticks, quotes, ;) is a shell-injection vector when the
+// emitted bash interpolates the value into `--query "${queryArg}"`. Static template
+// queries hand-written in gstack are safe, but the resolver API must defend against
+// future contributors writing dangerous values.
+const QUERY_SAFE_RE = /^[A-Za-z0-9 _-]+$/;
+
+/**
+ * B5 (#2790): run a learnings search with its stdout intact and its stderr and
+ * exit status kept, so a missing bun or a failed script prints why instead of
+ * reading as "nothing recorded". Two lines: the capture, then the verdict.
+ */
+export const learningsCapture = (command: string) => `{ _LE=$(${command} 2>&1 >&3 3>&-); _LR=$?; } 3>&1`;
+export const LEARNINGS_VERDICT = `[ "$_LR" = 0 ] || { _LE=\${_LE%%$'\\n'*}; echo "LEARNINGS: unavailable (\${_LE:-exit $_LR})"; }`;
+
+export function generateLearningsSearch(ctx: TemplateContext, args?: string[]): string {
+  // Parse query= arg. Empty value falls through to no-query (principle of least surprise:
+  // a stray {{LEARNINGS_SEARCH:query=}} placeholder gets today's behavior, not a build error).
+  const queryArg = (args || [])
+    .filter(a => a.startsWith('query='))
+    .map(a => a.slice(6))
+    .filter(Boolean)[0];
+  if (queryArg && !QUERY_SAFE_RE.test(queryArg)) {
+    throw new Error(
+      `{{LEARNINGS_SEARCH:query=...}} value must match ${QUERY_SAFE_RE} (alphanumeric, space, hyphen, underscore). Got: ${JSON.stringify(queryArg)}`
+    );
+  }
+  const queryFlag = queryArg ? ` --query "${queryArg}"` : '';
+  const findingKind = ctx.skillName === 'qa' || ctx.skillName === 'qa-only' ? 'QA' : 'review';
+
+  if (ctx.skillName === 'qa-only') {
+    return `## Prior Learnings
+
+Read this project's existing learnings.jsonl only if its directory is already known
+and the caller permits that Read. Otherwise skip this optional lookup.
+${queryArg ? `Look for notes matching "${queryArg}".\n` : ''}Do not run gstack-learnings-search here: its slug helper can update a cache.
+Do not change configuration, enable cross-project search or create a learning store.
+
+Treat old notes as leads, not proof. When a QA finding matches a past learning,
+cite it as "Prior learning applied: [key] (confidence N/10, from [date])" and verify
+the current behavior. Reading old notes never requires writing new ones.`;
+  }
+
+  if (getHostConfig(ctx.host).learningsMode === 'basic') {
+    // Basic learnings mode (host config learningsMode: 'basic' — every host
+    // except claude and factory): simpler version, no cross-project prompt,
+    // uses $GSTACK_BIN (all basic hosts are env-var hosts)
     return `## Prior Learnings
 
 Search for relevant learnings from previous sessions on this project:
 
 \`\`\`bash
-$GSTACK_BIN/gstack-learnings-search --limit 10 2>/dev/null || true
+${learningsCapture(`$GSTACK_BIN/gstack-learnings-search --limit 10${queryFlag}`)}
+${LEARNINGS_VERDICT}
 \`\`\`
 
-If learnings are found, incorporate them into your analysis. When a review finding
+If learnings are found, incorporate them into your analysis. When a ${findingKind} finding
 matches a past learning, note it: "Prior learning applied: [key] (confidence N, from [date])"`;
   }
 
@@ -36,13 +82,14 @@ Search for relevant learnings from previous sessions:
 _CROSS_PROJ=$(${ctx.paths.binDir}/gstack-config get cross_project_learnings 2>/dev/null || echo "unset")
 echo "CROSS_PROJECT: $_CROSS_PROJ"
 if [ "$_CROSS_PROJ" = "true" ]; then
-  ${ctx.paths.binDir}/gstack-learnings-search --limit 10 --cross-project 2>/dev/null || true
+  ${learningsCapture(`${ctx.paths.binDir}/gstack-learnings-search --limit 10${queryFlag} --cross-project`)}
 else
-  ${ctx.paths.binDir}/gstack-learnings-search --limit 10 2>/dev/null || true
+  ${learningsCapture(`${ctx.paths.binDir}/gstack-learnings-search --limit 10${queryFlag}`)}
 fi
+${LEARNINGS_VERDICT}
 \`\`\`
 
-If \`CROSS_PROJECT\` is \`unset\` (first time): Use AskUserQuestion:
+If \`CROSS_PROJECT\` is \`unset\` (first time): ${ctx.skillName === 'plan-eng-review' ? 'Build a full decision brief from these facts and options using the preamble format, then ask and wait:' : 'Use AskUserQuestion:'}
 
 > gstack can search learnings from your other projects on this machine to find
 > patterns that might apply here. This stays local (no data leaves your machine).
@@ -58,7 +105,7 @@ If B: run \`${ctx.paths.binDir}/gstack-config set cross_project_learnings false\
 
 Then re-run the search with the appropriate flag.
 
-If learnings are found, incorporate them into your analysis. When a review finding
+If learnings are found, incorporate them into your analysis. When a ${findingKind} finding
 matches a past learning, display:
 
 **"Prior learning applied: [key] (confidence N/10, from [date])"**
@@ -68,7 +115,7 @@ smarter on their codebase over time.`;
 }
 
 export function generateLearningsLog(ctx: TemplateContext): string {
-  const binDir = ctx.host === 'codex' ? '$GSTACK_BIN' : ctx.paths.binDir;
+  const binDir = ctx.paths.binDir; // env-var hosts already resolve to $GSTACK_BIN via types.ts
 
   return `## Capture Learnings
 
