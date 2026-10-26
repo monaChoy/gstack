@@ -30,7 +30,8 @@ it, so `headless` keeps its BLOCK semantics.
   sync skipped (unattended session)` on stderr), and `gstack-skill-end` drains
   nothing. Inherited enabled settings and pending queue work are left for the
   next human session. The upgrade offer becomes one line at skill end, read from
-  the local cache: `UPGRADE_AVAILABLE: <version>; run /gstack-upgrade`.
+  the local cache: `UPGRADE_AVAILABLE: <version>; run /gstack-upgrade` (`<version>+<n> (main at <sha>)` when
+  main moved <n> commits past the checkout without a new version).
 - **Questions decide themselves, gates do not.** A question with a
   `(recommended)` option takes it and appends the choice to `decisions.jsonl`
   with `kind: "auto"`. A question with no recommendation, any consent, any
@@ -56,17 +57,45 @@ An unknown `GSTACK_SESSION_KIND` value coerces to `interactive` and says so:
 
 ## The terminal line
 
-Every workflow skill ends an unattended run with one line the parent greps:
+A run that writes a record ends with one line the parent greps:
 
 ```
 GSTACK_RESULT: skill=<name> status=<status> run=<dir>
 ```
 
 `status` is one of `complete`, `gate_pending`, `incomplete`, `interrupted` or
-`refused`; `run` is the directory that holds the artifacts below. `/autoplan`
+`refused`; `run` is where the run's record is. `/autoplan`
 always ends `gate_pending` when it reaches the final gate, because the gate is
 written and never approved. Pure queries (`gstack-artifact schema`,
 `gstack-gate render`) print no result line.
+
+Not every workflow writes this line or a run directory today:
+
+- **`/autoplan`** writes the full run directory below through `gstack-autoplan`,
+  and `gstack-artifact validate` checks it. It is the only skill with steps
+  and helpers that write `run.json`, `decisions.jsonl` and `gate.json`.
+- **Workflow commands** `gstack-pregate`, `gstack-regen`, `gstack-restamp` and
+  `gstack-ship-queue` print their own line, with `run=` naming their own record
+  (the pregate receipt, the regen worktree, the restamp journal, the queue
+  record), not a run directory.
+- **A refused launch.** Any skill whose install check refuses it at startup
+  prints `GSTACK_RESULT: skill=<name> status=refused run=-` and stops.
+- **Every other workflow skill** (`/ship`, `/review`, `/qa`, `/design-review`,
+  `/spec`, `/land-and-deploy` and the rest) gets the session rules above (no
+  prompts, approvals stay pending, nothing published), but has no step that
+  writes a run directory or prints the line, so a parent should not wait for
+  either. `/eval-plan` asks for a `gate_pending` line at its spend gate, but no
+  helper writes its `gate.json` yet (`gstack-gate` renders and parses a gate
+  list; it does not create one). `/cso` skips the shared startup, so these
+  session rules do not reach it at all. Read each skill's own record instead:
+  the review-log rows (`gstack-review-read`) for `/review`, the
+  `qa-report-*.md` file for `/qa`, and the ship receipt for `/ship`. When
+  the run did not push (an unattended run must not), read the receipt file in
+  the child's checkout with `gstack-ship-receipt read --body .gstack/tmp/ship-receipt.md --json`;
+  use `gstack-ship-receipt read --pr <n> --json` only once a PR exists. In both
+  cases compare the receipt's `head` to the branch SHA (`git rev-parse HEAD` in
+  the child's checkout): `read` does not check that the receipt is current, so
+  an older PR's receipt reads as valid.
 
 Every workflow command shares one exit table: `0` ok, `1` fail, `2` usage,
 `3` refused or needs a flag. Error lines end with a result code in parentheses,
@@ -75,6 +104,8 @@ in [troubleshooting.md](troubleshooting.md#unattended-runs-and-artifacts) with
 a `fix:` clause. Grep the code, not the prose.
 
 ## The run directory
+
+`/autoplan` writes these files; the next section shows how a parent reads them.
 
 | File | Schema | Contents |
 |------|--------|----------|
@@ -111,14 +142,14 @@ JSON Schema for any of `findings`, `decisions`, `tasks`, `timing`, `run`,
 3. **List what is pending.**
    ```bash
    jq -c 'select(.status=="pending")' <dir>/decisions.jsonl
-   gstack-gate render <dir>/gate.json          # the numbered list and reply grammar
+   gstack-gate render <dir>/gate.json --all    # the numbered list and reply grammar, every page
    ```
-4. **Answer the gate** by composing the reply grammar (`all`, `<id><option>`
-   tokens such as `d3b uc1a`, or `all except <tokens>`; bare yes/no is
-   rejected) and feeding it back with the gate revision you read:
+4. **Answer the gate** by composing the reply grammar (`rec`, `as-is`,
+   `<id><option>` tokens such as `d3b uc1a`, or `rec except <tokens>`; bare
+   yes/no is rejected) and feeding it back with the gate revision you read:
    ```bash
-   gstack-gate parse <dir>/gate.json --reply "all except d3b" --gate-rev 1 --json
-   gstack-gate decisions <dir>/gate.json --reply "all except d3b" --gate-rev 1 >> <dir>/decisions.jsonl
+   gstack-gate parse <dir>/gate.json --reply "rec except d3b" --gate-rev 1 --json
+   gstack-gate decisions <dir>/gate.json --reply "rec except d3b" --gate-rev 1 >> <dir>/decisions.jsonl
    ```
    A stale revision is `GATE_REV_STALE` and a reply with unparsed tokens is
    `GATE_REPLY_UNPARSED`; both exit `1` and write nothing.
@@ -150,8 +181,8 @@ $AP next --out <dir> --plan <plan.md> [--ui|--no-ui] [--developer-tool] [--no-dx
 #   SCOPE: ui=yes (...) dx=yes (detected: ...) source=ui:detected,dx:detected
 #   DRIVER: <root>/autoplan/DRIVER.md
 #   Skipped sections: none (scope: ui=yes,dx=yes,source=ui:detected,dx:detected; checklist=loaded)
-#   ATTEMPT: <run>-a1 phase=ceo voice=native  prompt=<dir>/ceo-native-prompt.md  result=<dir>/ceo-native.md  model_family=...
-#   ATTEMPT: <run>-a2 phase=ceo voice=outside prompt=<dir>/ceo-outside-prompt.md result=<dir>/ceo-outside.md model_family=differs from the native reviewer
+#   ATTEMPT: <run>-a1 phase=ceo voice=native  prompt=<dir>/ceo-native-prompt.md  result=<dir>/ceo-native.a1.md  model_family=...
+#   ATTEMPT: <run>-a2 phase=ceo voice=outside prompt=<dir>/ceo-outside-prompt.md result=<dir>/ceo-outside.a2.md model_family=differs from the native reviewer
 #   SPEND: spent=0.00 reserved=0.00 unknown=0(0.00) worst_case=0.00 cap=none
 #   GSTACK_RESULT: skill=autoplan status=awaiting_result run=<dir>
 ```
@@ -173,51 +204,83 @@ the plan.
    `release --attempt <id>` returns its reservation).
 2. **Submit each result exactly once.**
    ```bash
-   $AP submit --out <dir> --phase ceo --voice native  --result <dir>/ceo-native.md  --model <id> --attempt <run>-a1
-   $AP submit --out <dir> --phase ceo --voice outside --result <dir>/ceo-outside.md --model <id> --attempt <run>-a2 [--runner host-subagent] [--usage-usd <n>]
+   $AP submit --out <dir> --phase ceo --voice native  --result <dir>/ceo-native.a1.md  --model <id> --attempt <run>-a1
+   $AP submit --out <dir> --phase ceo --voice outside --result <dir>/ceo-outside.a2.md --model <id> --attempt <run>-a2 [--runner host-subagent (default)] [--usage-usd <n>]
    #   BOUND: <run>-a1 phase=ceo voice=native model=<id> findings=7 sha256=<result hash prefix>
    #   PHASE_CLOSED: ceo confirmed=4 disagree=1 new=2 native_only=1 coverage=both
    ```
+   Submit seals the bytes it bound as `<phase>-<voice>.<attempt>.bound.md`
+   (read-only); a later write to the reviewer's file changes nothing bound,
+   and another attempt's result file is refused (`ATTEMPT_MISMATCH`).
    Binding checks the receipt line against the phase snapshot
    (`RESULT_RECEIPT_MISSING`), parses the canonical findings fence
    (`RESULT_FINDINGS_MISSING`), refuses an outside model from the native
    family (`MODEL_FAMILY_CONFLICT`), and refuses a second bind of the same
    attempt or a bind while the phase is not awaiting it (`ATTEMPT_MISMATCH`,
    `PHASE_NOT_AWAITING`, exit 3). Both voices in closes the phase: the
-   reconciliation (`confirmed` / `disagree` / `new` per outside finding, with
+   reconciliation (`confirmed` / `unverified` / `disagree` / `new` per outside finding, with
    disagreement and resolution kept separate) is written to
-   `<phase>-consensus.{json,md}`, and the Eng prompt refuses to open without
-   every closed prior phase's consensus (`CONSENSUS_MISSING`).
+   `<phase>-consensus.{json,md}`, and every later phase's prompts (DX, design
+   and Eng alike) carry each closed predecessor's consensus as data; a phase
+   refuses to open without one (`CONSENSUS_MISSING`).
 3. **Loop `next` until `status=gate_pending`.** Eng always runs last. The gate
    (`gate.json`, `gate_rev`) lists user challenges as approval items,
    disagreements as auto items and `p1` plan approval; nothing is approved.
 4. **Answer the gate** with the reply grammar and the revision you read:
    ```bash
-   $AP answer --out <dir> --gate-rev 1 --reply "all"              # every recommendation; agreeing plan changes print APPLY:
-   $AP answer --out <dir> --gate-rev 1 --reply "all as-is"        # APPROVED: keeps every direction, no new paid phase
-   $AP answer --out <dir> --gate-rev 1 --reply "all except d1b"   # APPLY: <id> ...; REOPENED: ceo,eng; NEXT: gstack-autoplan revise ...
+   $AP answer --out <dir> --gate-rev 1 --reply "rec" --by human            # every recommendation, plan changes included (APPLY: ...; amend_pending)
+   $AP answer --out <dir> --gate-rev 1 --reply "as-is" --by human          # APPROVED: keeps every direction, no new paid phase
+   $AP answer --out <dir> --gate-rev 1 --reply "rec except d1b" --by agent:<id> --owner-reply "<owner's words>"
    ```
-   A user challenge both voices raised on a confirmed finding with the same
-   `changes` value is recommended as `b`, and option b shows both voices'
-   remedies (`recommended: b (both voices; remedies shown)`); a `--reconcile`
-   record naming one shared `proposal` shows that instead. Disagreeing or
-   missing remedies keep `a`. Every accepted plan change prints
+   `--by human` means the owner typed the tokens; `--by agent:<thread or id>`
+   means an agent relayed them, and then `--owner-reply` (or `-` for stdin,
+   `--owner-reply-file <path>`) stores the owner's words verbatim
+   (`OWNER_REPLY_REQUIRED`); owner words that parse to different choices are
+   refused (`GATE_OWNER_REPLY_MISMATCH`). An unattended run refuses an answer
+   without `--by` (`ANSWER_BY_REQUIRED`, exit 3) and records the value as
+   `answered_by` on every decision row and in the review record's gate line,
+   so a gate an agent closed is distinguishable from one the owner closed.
+   `gstack-autoplan recommend` changes one recommendation before relay; it
+   bumps the gate's `rec_rev`, and a later `rec` needs the `--rec-hash` from
+   the render the owner saw (`GATE_REC_STALE`).
+   A user challenge both voices raised on a confirmed finding (a title match,
+   not file:line proximity alone, which is `unverified`) with the same
+   `changes` value is recommended as `b` only with one shared proposal: a
+   `--reconcile` record naming it, or the same remedy from both voices.
+   Different or missing remedies keep `a`, and option b shows both verbatim
+   with the basis. `rec` (alias `all`) takes every recommendation, so it
+   accepts the items recommended `b`. Every accepted plan change prints
    `APPLY: <decision id> <title> -> <chosen text>` and becomes a pending
    amendment: `next` refuses with `PLAN_AMEND_PENDING` and `export` refuses a
-   `complete` run until `revise --incorporates` names it (see below).
+   `complete` run until `revise --incorporates` names it, or `revise --settle
+   <id>` settles a packaging or ordering change that needs no plan edit.
    A stale revision (`GATE_REV_STALE`, exit 3), bare `yes`/`no`, or a
    conflicting reply (`GATE_REPLY_UNPARSED`) writes nothing. A reply that
    leaves approval items pending records only the answered auto items and
-   keeps the gate; a later reply never overwrites an earlier answer. A choice
-   that changes the plan reopens that phase plus Eng, archives their bound
-   files as `*.r<rev>.*`, and the next gate is `gate_rev + 1`; `p1d` reruns
-   every phase on the current plan; `p1e` ends `incomplete`.
+   keeps the gate; a later reply never overwrites an earlier answer. An
+   accepted change reopens nothing at answer (status `amend_pending`); `revise`
+   reopens each phase whose reviewed plan changed plus Eng, archives their
+   prompts and consensus as `*.r<rev>.*` (sealed `*.bound.md` results stay in
+   place), and the next gate is `gate_rev + 1`; `p1d` reruns every phase on the
+   current plan; `p1e` ends `incomplete`.
 5. **Export and validate.** `$AP export --out <dir>` writes `plan.md` (with
    the `## URGENT, outside this plan` block first), `review-record.md`,
    `tasks.jsonl`, `decisions.jsonl`, `findings.jsonl`, `timing.json` and
    `run.json`; then `gstack-artifact validate <dir>/run.json` and the
    consumption steps above apply unchanged. `$AP status --out <dir>` and
-   `resume` work after the run directory moves (paths are re-rooted).
+   `resume` work after the run directory moves (paths are re-rooted; journal
+   paths are run-relative). With `GSTACK_AUTOPLAN_CHECKPOINT_DIR` set (on Capy,
+   `gstack-config set autoplan_checkpoint drive` defaults it to the private
+   project-user Drive folder; unset, the first `next` prints the export line),
+   a run at rest, after each bound voice and after each phase transition
+   publishes an immutable, hash-listed generation under
+   `<dir>/<run>/generations/` and switches `current.json` to it (the previous
+   generation is kept; a stale copy never replaces a newer one; a directory
+   overlapping the run is refused with `CHECKPOINT_OVERLAP`; a failure is a
+   `CHECKPOINT: failed` warning that leaves the command's exit code alone).
+   `$AP checkpoints --from <dir>` lists generations with their hash status, and
+   `$AP resume --out <new dir> --from <dir>/<run>` restores the newest valid
+   one after validating the staged run (`CHECKPOINT_INVALID`).
 
 Concurrency and recovery: every state write is a locked read-modify-write
 (`run.lock`; a second writer sees `RUN_LOCKED`), attempts are journaled to

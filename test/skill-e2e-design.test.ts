@@ -124,7 +124,7 @@ Write DESIGN.md and CLAUDE.md (or update it) in the working directory.`,
       timeout: CAPTURE_LONG_MS,
       testName: 'design-consultation-core',
       runId,
-      model: 'claude-opus-4-7',
+      model: resolveEvalModel('capture'),
     });
 
     logCost('/design-consultation core', result);
@@ -298,7 +298,7 @@ Run Phase 0's DESIGN.md format check exactly as written (the gstack bin director
       timeout: CAPTURE_LONG_MS,
       testName: 'design-consultation-existing',
       runId,
-      model: 'claude-opus-4-7',
+      model: resolveEvalModel('capture'),
     });
 
     logCost('/design-consultation existing', result);
@@ -814,6 +814,26 @@ function sourceScanAgainstMain(commands: string[], invocations: string[], repoDi
   return targets.join() === 'index.html,styles.css';
 }
 
+/** CI 38980005793: the agent ran the generated DOM block, which scans `"$_REPORT/dom/$_RUN"` with `_RUN="run1"`
+ * assigned in the same command. A DOM scan counts when one of its own arguments, after that command's literal
+ * `_REPORT=`/`_RUN=` assignments are substituted, is the run directory; `scan --changed` (source mode), a scan of
+ * another directory, quoted heredoc text and a non-literal or conflicting assignment never count. */
+function domScanOfRun(command: string, runDir: string): boolean {
+  const shell = executedShellText(command);
+  const assigned = new Map<string, Set<string>>();
+  for (const m of shell.matchAll(/(?<![\w$])(_REPORT|_RUN)=(?:"([^"$`\\]*)"|'([^']*)'|([^\s;&|<>()"'$`\\]*))(?=[\s;&|)]|$)/g)) {
+    assigned.set(m[1]!, (assigned.get(m[1]!) ?? new Set()).add(m[2] ?? m[3] ?? m[4] ?? ''));
+  }
+  const resolved = shell.replace(/\$(?:\{(_REPORT|_RUN)\}|(_REPORT|_RUN)(?!\w))/g, (all, braced?: string, bare?: string) => {
+    const values = assigned.get((braced ?? bare)!);
+    return values?.size === 1 ? [...values][0]! : all;
+  });
+  return [...resolved.matchAll(/gstack-design-detect\.ts scan ([^\n;&|<>]*)/g)].some(scan => {
+    const args = (scan[1]!.match(/"[^"]*"|'[^']*'|\S+/g) ?? []).map(arg => arg.replace(/^(["'])(.*)\1$/, '$2').replace(/\/+$/, ''));
+    return !args.includes('--changed') && args.includes(runDir);
+  });
+}
+
 if (!evalsEnabled) test('plugin handoff credits an executed source scan whose base resolved to main', () => {
   const repoDir = fs.mkdtempSync(path.join(os.tmpdir(), 'plugin-scan-replay-'));
   try {
@@ -1245,7 +1265,7 @@ Do not run npx. Do not fix anything.`,
         expect(result.exitReason).toBe('success');
         const bash = result.toolCalls.filter(c => c.tool === 'Bash').map(c => String(c.input?.command ?? ''));
         expect(bash.some(c => c.includes('dom-dump.js') && c.includes('--out') && c.includes('--raw'))).toBe(true); // $B js '('"$_DUMP"')()' with the file spliced in
-        expect(bash.some(c => /gstack-design-detect\.ts scan /.test(c) && c.includes('dom/run1'))).toBe(true);
+        expect(bash.some(c => domScanOfRun(c, path.join(allowed, 'dom', 'run1')))).toBe(true);
         expect(bash.some(c => /gstack-design-detect\.ts scan --changed/.test(c))).toBe(false);
         const dumps = fs.readdirSync(path.join(allowed, 'dom', 'run1')).filter(f => f.endsWith('.dom.html'));
         expect(dumps.length).toBeGreaterThan(0);
@@ -1296,8 +1316,8 @@ describeIfSelected('Design HTML slop gate E2E', ['design-html-slop-gate'], () =>
   testConcurrentIfSelected('design-html-slop-gate', async () => {
     const result = await runSkillTest({
       prompt: `Read design-html-gate.md: the /design-html detector probe block and its "Slop Gate (bounded, never a loop)" step.
-finalized.html in this directory is the finished page. Run the probe (--host claude), then the slop gate on finalized.html exactly as written: one surgical fix pass over the non-advisory findings, one rescan, then stop.
-Write ${workDir}/gate-output.md listing what you fixed and every remaining finding as accepted-with-reason, each tagged with its [rule-id]. Do not take screenshots, do not run npx, do not scan more than twice.`,
+finalized.html in this directory is the finished page. Run the probe (--host claude), then the slop gate on finalized.html exactly as written: one surgical fix pass over the non-advisory findings, one rescan. Then the craft check line that follows it, the same way, then stop.
+Write ${workDir}/gate-output.md listing what you fixed and every remaining finding as accepted-with-reason, each tagged with its [rule-id] or craft id. Do not take screenshots, do not run npx, do not run either check more than twice.`,
       workingDirectory: workDir,
       maxTurns: 20,
       timeout: CAPTURE_MS,
@@ -1312,6 +1332,9 @@ Write ${workDir}/gate-output.md listing what you fixed and every remaining findi
     const scans = result.toolCalls.filter(c => c.tool === 'Bash' && /gstack-design-detect\.ts scan /.test(String(c.input?.command ?? '')));
     expect(scans.length).toBeGreaterThanOrEqual(1);
     expect(scans.length).toBeLessThanOrEqual(2);
+    const craftRuns = result.toolCalls.filter(c => c.tool === 'Bash' && /gstack-design-craft['"]?\s+[^\s;|&]*\.html\b/.test(String(c.input?.command ?? '')));
+    expect(craftRuns.length).toBeGreaterThanOrEqual(1);
+    expect(craftRuns.length).toBeLessThanOrEqual(2);
     const outPath = path.join(workDir, 'gate-output.md');
     expect(fs.existsSync(outPath)).toBe(true);
     const out = fs.readFileSync(outPath, 'utf-8').toLowerCase();

@@ -52,7 +52,7 @@ When qualified CSO runtime images are published, setup gives each automatic prel
 
 Open Claude Code and paste this. Claude does the rest.
 
-> Install gstack: run **`git clone --single-branch --depth 1 https://github.com/garrytan/gstack.git ~/.claude/skills/gstack && cd ~/.claude/skills/gstack && ./setup`** then add a "gstack" section to CLAUDE.md that says to use the /browse skill from gstack for all web browsing, never use mcp\_\_claude-in-chrome\_\_\* tools, and lists the available skills: /office-hours, /plan-ceo-review, /plan-eng-review, /plan-design-review, /design-consultation, /design-shotgun, /design-html, /review, /deslop-shared-libs, /test-audit, /ship, /eval-plan, /land-and-deploy, /canary, /benchmark, /browse, /connect-chrome, /qa, /qa-only, /design-review, /scrape, /setup-browser-cookies, /setup-deploy, /setup-gbrain, /retro, /investigate, /document-release, /document-generate, /codex, /cso, /autoplan, /plan-devex-review, /devex-review, /careful, /freeze, /guard, /unfreeze, /gstack-upgrade, /learn. Then ask the user if they also want to add gstack to the current project so teammates get it.
+> Install gstack: run **`git clone --single-branch --depth 1 https://github.com/garrytan/gstack.git ~/.claude/skills/gstack && cd ~/.claude/skills/gstack && ./setup`** then add a "gstack" section to CLAUDE.md that says to use the /browse skill from gstack for all web browsing and never use mcp\_\_claude-in-chrome\_\_\* tools. Claude Code lists the installed skills itself, so the section needs no skill list. Then ask the user if they also want to add gstack to the current project so teammates get it.
 
 ### Step 2: Team mode — auto-update for shared repos (recommended)
 
@@ -65,6 +65,8 @@ From inside your repo, paste this. Switches you to team mode, bootstraps the rep
 No vendored files in your repo, no version drift, no manual upgrades. Every Claude Code session starts with a fast auto-update check (throttled to once/hour, network-failure-safe, completely silent).
 
 Swap `required` for `optional` if you'd rather nudge teammates than block them.
+
+`required` blocks skills with a hook that runs on [Node.js](https://nodejs.org/), so every teammate needs Node.js on PATH, on every OS. With Claude Code 2.1.295 or later the hook also blocks when it can't run (no Node.js, or a missing `.claude/hooks/check-gstack.cjs`); older Claude Code lets skills through in that case.
 
 ### OpenClaw
 
@@ -286,20 +288,20 @@ Each skill feeds into the next. `/office-hours` writes a design doc that `/plan-
 | `/plan-ceo-review` | **CEO / Founder** | Rethink the problem. Find the 10-star product hiding inside the request. Four modes: Expansion, Selective Expansion, Hold Scope, Reduction. |
 | `/plan-eng-review` | **Eng Manager** | Lock in architecture, data flow, diagrams, edge cases, and tests. Forces hidden assumptions into the open. |
 | `/plan-design-review` | **Senior Designer** | Rates each design dimension 0-10, explains what a 10 looks like, then edits the plan to get there. AI Slop detection. Interactive — one AskUserQuestion per design choice. |
-| `/plan-devex-review` | **Developer Experience Lead** | Interactive DX review: explores developer personas, benchmarks against competitors' TTHW, designs your magical moment, traces friction points step by step. Three modes: DX EXPANSION, DX POLISH, DX TRIAGE. 20-45 forcing questions. |
+| `/plan-devex-review` | **Developer Experience Lead** | Interactive DX review: explores developer personas, benchmarks against competitors' TTHW, designs your magical moment, traces friction points step by step. Scores error messages for the agents that read them ([agent-ready errors](docs/agent-ready-errors.md)). Three modes: DX EXPANSION, DX POLISH, DX TRIAGE. 20-45 forcing questions. |
 | `/design-consultation` | **Design Partner** | Build a complete design system from scratch. Researches the landscape, proposes creative risks, generates realistic product mockups. Writes `DESIGN.md` in the open DESIGN.md format, so impeccable, Google Stitch, and any tool that reads it share one file. |
 | `/review` | **Staff Engineer** | Find the bugs that pass CI but blow up in production. Auto-fixes the obvious ones. Flags completeness gaps and gate integrity: every weakened test, timeout, snapshot or suppression reaches a human by name. Advisory simplification lens flags over-built code — never blocks, never auto-applies. |
 | `/deslop-shared-libs` | **Shared Code Reviewer** | Find worthwhile shared-code extractions in recent work. Compares up to five opportunities and recommends the best three, with source evidence, reliability gains, and total code savings. Recommendations only. |
 | `/test-audit` | **Test Auditor** | Sweep existing tests for ones that cost more than they protect: source greps, duplicates, assertion-free probes, test-only exports. Every candidate carries an evidence card; report-only unless you approve a batch. |
 | `/investigate` | **Debugger** | Systematic root-cause debugging. Iron Law: no fixes without investigation. Traces data flow, tests hypotheses, stops after 3 failed fixes. |
 | `/design-review` | **Designer Who Codes** | Same audit as /plan-design-review, then fixes what it finds. Atomic commits, before/after screenshots. If you have impeccable installed, its engine runs first and every mechanical finding arrives tagged with its rule id. |
-| `/devex-review` | **DX Tester** | Live developer experience audit. Actually tests your onboarding: navigates docs, tries the getting started flow, times TTHW, screenshots errors. Compares against `/plan-devex-review` scores — the boomerang that shows if your plan matched reality. |
+| `/devex-review` | **DX Tester** | Live developer experience audit. Actually tests your onboarding: navigates docs, tries the getting started flow, times TTHW, triggers CLI errors the way an agent meets them (`gstack-error-capture`: no terminal, contained, redacted). Compares against `/plan-devex-review` scores — the boomerang that shows if your plan matched reality. |
 | `/design-shotgun` | **Design Explorer** | "Show me options." Generates 4-6 AI mockup variants, opens a comparison board in your browser, collects your feedback, and iterates. Taste memory learns what you like. Repeat until you love something, then hand it to `/design-html`. |
 | `/design-html` | **Design Engineer** | Turn a mockup into production HTML that actually works. Pretext computed layout: text reflows, heights adjust, layouts are dynamic. 30KB, zero deps. Detects React/Svelte/Vue. Smart API routing per design type (landing page vs dashboard vs form). One slop-gate pass through the impeccable engine when you have it. The output is shippable, not a demo. |
 | `/qa` | **QA Lead** | Explore browser, API, CLI, job and webhook behavior. Reproduce bugs, write failing regressions, fix the cause and re-verify before committing. |
 | `/qa-only` | **QA Reporter** | Explore and report with replayable evidence. Suggest regression cases without changing product code or tests. |
 | `/pair-agent` | **Multi-Agent Coordinator** | Share gstack's own browser with any AI agent. One command, one paste, connected. Works with OpenClaw, Hermes, Codex, Cursor, or anything that can curl. Each agent gets its own tab. Auto-launches headed mode so you watch everything. Auto-starts ngrok tunnel for remote agents. Scoped tokens, tab isolation, rate limiting, activity attribution. (Runs on the bundled browser — the fallback engine; agents driving Aside just open their own tabs.) |
-| `/cso` | **Chief Security Officer** | Security audit with an application model, supported findings, independent challenge, and explicit coverage. Static assessment remains available without catalog profiles. With matching qualified profiles, comprehensive mode adds contained runtime/scanner execution and reviewable repair candidates for Node/Bun, Python, and Rails; no qualified runtime or scanner profile is published yet, so audits run static assessment only. Runtime-tested bundles authenticate separate external assertions. Project-test completion remains `self_reported` because target code controls the test process; `tested` is reserved for a future target-independent completion witness. |
+| `/cso` | **Chief Security Officer** | Security audit with an application model, supported findings, independent challenge, and explicit coverage. Static assessment remains available without catalog profiles. With matching qualified profiles, comprehensive mode adds contained runtime/scanner execution and reviewable repair candidates for Node/Bun, Python, and Rails. Qualified runtime and scanner images are published for linux/amd64 and linux/arm64. Without Docker, audits run static assessment only. Runtime-tested bundles authenticate separate external assertions. Project-test completion remains `self_reported` because target code controls the test process; `tested` is reserved for a future target-independent completion witness. |
 | `/ship` | **Release Engineer** | Sync main, run tests, explore changed behavior, audit coverage, gate integrity and docs, then verify, push and open a PR. |
 | `/land-and-deploy` | **Release Engineer** | Merge the PR, wait for CI and deploy, verify production health. One command from "approved" to "verified in production." |
 | `/canary` | **SRE** | Post-deploy monitoring loop. Watches for console errors, performance regressions, and page failures. |
@@ -513,9 +515,18 @@ The sprint structure is what makes parallelism work. Without a process, ten agen
 
 ### Voice input (AquaVoice, Whisper, etc.)
 
-gstack skills have voice-friendly trigger phrases. Say what you want naturally —
-"run a security check", "test the website", "do an engineering review" — and the
-right skill activates. You don't need to remember slash command names or acronyms.
+Many gstack skills list speech-to-text aliases (`voice-triggers:` in their
+templates): "security check" for `/cso`, "run QA" or "test the app" for `/qa`,
+"tech review" for `/plan-eng-review`. Say one of those naturally and the right
+skill can be picked without the slash command name. On Claude Code the aliases
+are routing lines in the root `/gstack` router; on Codex and the other hosts
+they are appended to each skill's description, which is what those hosts match
+on.
+
+The separate `triggers:` list in a skill's frontmatter is gstack metadata, not a
+matching surface. Claude Code and Codex choose a skill from its name and
+description, so a phrase that appears only under `triggers:` does not activate
+the skill (Codex output drops the field; the GBrain host keeps it).
 
 ## Uninstall
 
@@ -656,6 +667,7 @@ Other references: [docs/gbrain-sync.md](docs/gbrain-sync.md) (sync-specific guid
 |-----|---------------|
 | [Skill Deep Dives](docs/skills.md) | Philosophy, examples, and workflow for every skill (includes Greptile integration) |
 | [Diagrams & Document Formats](docs/howto-diagrams-and-formats.md) | Mermaid/excalidraw fences in PDFs, image sizing and safety defaults, `--to html\|docx`, `/diagram` triplets |
+| [First Production Deploy](docs/howto-bring-up-a-first-deploy.md) | What to do when `/setup-deploy` says nothing is deployed yet: hosting, env and secrets, DNS, checking it works, then back to `/setup-deploy` |
 | [Builder Ethos](ETHOS.md) | Builder philosophy: Boil the Ocean, Search Before Building, three layers of knowledge |
 | [Using GBrain with GStack](USING_GBRAIN_WITH_GSTACK.md) | Every path, flag, bin helper, and troubleshooting step for `/setup-gbrain` |
 | [GBrain Sync](docs/gbrain-sync.md) | Cross-machine memory setup, privacy modes, troubleshooting |
@@ -796,6 +808,8 @@ types into that element; bare `browse type <text>` types into whatever has focus
 
 **Don't use some skills?** `gstack-config set disabled_skills make-pdf,pair-agent` stops registering them on every host, so their descriptions stop loading into each session. Claude Code updates right away; other hosts on their next `./setup --host <name>` or `/gstack-upgrade`. Their files stay installed, so a skill that calls a disabled one still works (you get a warning). Typos are rejected with the closest skill name, `gstack-upgrade` can't be disabled, and `gstack-config set disabled_skills ""` re-enables everything.
 
+**Never use plan mode?** `gstack-config set plan_mode_preamble off` leaves the "Plan Mode Safe Operations" and "Skill Invocation During Plan Mode" sections (about 1.6 KB per skill) out of every installed skill on the next `./setup` run; the command prints the exact `./setup --refresh-registered` line that applies it. Claude Code then serves a render under `~/.gstack/render/claude` instead of the committed files. Commands marked "PLAN MODE EXCEPTION — ALWAYS RUN" keep their marker. `gstack-config set plan_mode_preamble on` (the default) and another `./setup` bring the sections back. It matters for Claude Code, Copilot and OpenCode: hosts without plan mode (Codex and others) never carry these sections.
+
 **Want namespaced commands?** `cd ~/.claude/skills/gstack && ./setup --prefix` — switches from `/qa` to `/gstack-qa`. Useful if you run other skill packs alongside gstack.
 
 **Codex says "Skipped loading skill(s) due to invalid SKILL.md"?** Your Codex skill descriptions are stale. `${CODEX_HOME:-~/.codex}/skills/gstack` is a runtime directory, not the checkout: `./setup --status` shows the Codex row's source checkout. Fix: `cd <that source> && git pull && ./setup --host codex` — for a repo-local install, run it from inside the project.
@@ -834,18 +848,14 @@ a generated gstack SKILL.md and then edited it, that file is moved to
 `~/.gstack/backups/skills/<timestamp>/<skill>/SKILL.md` before gstack's is
 linked in, never deleted.
 
-**Claude says it can't see the skills?** Make sure your project's `CLAUDE.md` has a gstack section. Add this:
+**Claude says it can't see the skills?** Check that they are installed (`ls ~/.claude/skills`) and restart Claude Code; it lists every installed skill with its description, so CLAUDE.md does not need to enumerate them (a pasted list goes stale with each release). Your project's `CLAUDE.md` only needs the browsing rule:
 
 ```
 ## gstack
 Use /browse from gstack for all web browsing. Never use mcp__claude-in-chrome__* tools.
-Available skills: /office-hours, /plan-ceo-review, /plan-eng-review, /plan-design-review,
-/design-consultation, /design-shotgun, /design-html, /review, /deslop-shared-libs, /test-audit, /ship, /eval-plan, /land-and-deploy,
-/canary, /benchmark, /browse, /open-gstack-browser, /qa, /qa-only, /design-review, /scrape,
-/setup-browser-cookies, /setup-deploy, /setup-gbrain, /sync-gbrain, /retro, /investigate,
-/document-release, /document-generate, /codex, /cso, /autoplan, /pair-agent, /careful, /freeze,
-/guard, /unfreeze, /gstack-upgrade, /learn.
 ```
+
+If an older install prompt left an "Available skills:" line in your CLAUDE.md, delete it.
 
 ## License
 

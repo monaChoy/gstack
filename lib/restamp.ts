@@ -24,8 +24,10 @@ import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { bunIsolationArgs } from './bun-isolation';
 import { checkChangelog, mergeChangelogs, parseChangelog, reheadChangelog } from './changelog-check';
 import { type ResultCodeName } from './result-codes';
+import { runScriptSync, wtreeFingerprint } from './script-invocation';
 import {
   SHIP_POLICY_PATH, VERSION_SLOT, assertInsideRoot, declaredCommands, isUnavailable, loadPolicyFromBase, loadPolicyFromHead, matchesAny,
   type LoadedPolicy, type QueueMode, type ShipPolicy,
@@ -66,7 +68,7 @@ export interface RestampResult {
 
 function sha256(buf: Buffer | string): string { return createHash('sha256').update(buf).digest('hex'); }
 function git(cwd: string, args: string[], env?: NodeJS.ProcessEnv): { ok: boolean; out: string; err: string; status: number | null } {
-  const r = spawnSync('git', args, { cwd, encoding: 'utf8', timeout: 60_000, env: env ?? process.env });
+  const r = spawnSync('git', args, { cwd, encoding: 'utf8', timeout: 60_000, env: env ?? process.env, maxBuffer: 64 * 1024 * 1024 });
   return { ok: r.status === 0, out: (r.stdout ?? '').replace(/\n$/, ''), err: (r.stderr ?? '').trim(), status: r.status };
 }
 class Refusal extends Error { constructor(public code: ResultCodeName, message: string, public extra: Partial<RestampResult> = {}) { super(message); } }
@@ -177,12 +179,16 @@ function planVersions(o: RestampOptions, loaded: LoadedPolicy, policyLabel: stri
     newVersion = bumped(atBase.version, level);
     claims = 'ignored (stamp-at-merge)';
   } else {
-    const r = spawnSync('bun', [path.join(BIN_DIR, 'gstack-next-version'), '--base', o.base, '--bump', level, '--current-version', atBase.version], { cwd: o.repoRoot, encoding: 'utf8', timeout: 120_000, env: o.env ?? process.env });
+    const r = spawnSync(process.execPath, [...bunIsolationArgs(), path.join(BIN_DIR, 'gstack-next-version'), '--base', o.base, '--bump', level, '--current-version', atBase.version], { cwd: o.repoRoot, encoding: 'utf8', timeout: 120_000, env: o.env ?? process.env });
     let q: any = null;
     try { q = JSON.parse(r.stdout ?? ''); } catch {}
     const usable = r.status === 0 && q && typeof q.version === 'string' && parseVersion(q.version) && (q.offline === false || q.fallback === 'git');
     newVersion = usable ? q.version : bumped(atBase.version, level);
-    claims = usable ? `read (claim-at-open; queue ${JSON.stringify(q.claimed ?? q.queue ?? [])})` : 'unverified (claim-at-open; gstack-next-version unusable, local arithmetic)';
+    const queue = JSON.stringify(q?.claimed ?? q?.queue ?? []);
+    const unknown = (Array.isArray(q?.unknown_claims) ? q.unknown_claims : []).map((n: unknown) => `#${n}`).join(', ') || 'some open PRs';
+    claims = !usable ? 'unverified (claim-at-open; gstack-next-version unusable, local arithmetic)'
+      : q.complete === false ? `incomplete (claim-at-open; the VERSION claims of PR ${unknown} are unknown, so ${q.version} is provisional and may collide; rerun, then ask the coordinator before stamping; queue ${queue})`
+      : `read (claim-at-open; queue ${queue})`;
   }
   // The branch's own tentative stamp: its VERSION when it moved past base; else nothing (mentions come from the lines it added).
   const branchStamp = oldVersion !== atBase.version ? oldVersion : null;
@@ -190,7 +196,7 @@ function planVersions(o: RestampOptions, loaded: LoadedPolicy, policyLabel: stri
 }
 
 /** The version writer's own files: the version source, the manifest (root or pinned) and the npm lockfiles beside it. */
-function versionFiles(root: string, versionRel: string): string[] {
+export function versionFiles(root: string, versionRel: string): string[] {
   const pin = path.join(root, '.gstack', 'package-json-path');
   const pkgRel = fs.existsSync(pin) ? (fs.readFileSync(pin, 'utf8').split('\n')[0]?.trim() || 'package.json') : 'package.json';
   const dir = path.dirname(pkgRel) === '.' ? '' : path.dirname(pkgRel) + '/';
@@ -204,9 +210,13 @@ function allowedOutput(plan: Plan, root: string, rel: string): boolean {
 }
 
 interface Hunk { removed: string[]; added: string[]; at: number }
-export interface FileDiff { path: string; binary: boolean; hunks: Hunk[]; status: 'M' | 'A' | 'D' | 'R' }
+export interface FileDiff { path: string; binary: boolean; hunks: Hunk[]; status: 'M' | 'A' | 'D' | 'R'; modeChanged?: boolean }
 
-/** Parse `git diff --unified=0` into per-file hunks of removed/added lines (shared with lib/tree-receipt.ts). */
+/**
+ * Parse `git diff --unified=0` into per-file hunks of removed/added lines (shared with lib/tree-receipt.ts).
+ * File headers come only before a file's first hunk: inside a hunk every `-`/`+` line is content, so a
+ * body line that begins `--` or `++` (`---`/`+++` in the diff) is never dropped as a header.
+ */
 export function parseUnifiedDiff(text: string): FileDiff[] {
   const files: FileDiff[] = [];
   let cur: FileDiff | null = null;
@@ -220,11 +230,12 @@ export function parseUnifiedDiff(text: string): FileDiff[] {
     } else if (!cur) continue;
     else if (line.startsWith('new file mode')) cur.status = 'A';
     else if (line.startsWith('deleted file mode')) cur.status = 'D';
+    else if (!hunk && (line.startsWith('old mode ') || line.startsWith('new mode '))) cur.modeChanged = true;
     else if (line.startsWith('rename to ')) cur.status = 'R';
     else if (line.startsWith('Binary files')) cur.binary = true;
     else if (line.startsWith('@@')) { hunk = { removed: [], added: [], at: Number(/^@@ -\d+(?:,\d+)? \+(\d+)/.exec(line)?.[1] ?? 0) }; cur.hunks.push(hunk); }
-    else if (hunk && line.startsWith('-') && !line.startsWith('---')) hunk.removed.push(line.slice(1));
-    else if (hunk && line.startsWith('+') && !line.startsWith('+++')) hunk.added.push(line.slice(1));
+    else if (hunk && line.startsWith('-')) hunk.removed.push(line.slice(1));
+    else if (hunk && line.startsWith('+')) hunk.added.push(line.slice(1));
   }
   return files;
 }
@@ -344,7 +355,7 @@ function runStages(o: RestampOptions, plan: Plan, staging: string, since: string
   const v = stage('version');
   if (command) { v.status = 'skipped'; v.detail = 'restamp_command owns the version'; }
   else {
-    const w = spawnSync('bun', [path.join(BIN_DIR, 'gstack-version-bump'), 'write', '--version', plan.newVersion], { cwd: staging, encoding: 'utf8', timeout: 120_000, env });
+    const w = spawnSync(process.execPath, [...bunIsolationArgs(), path.join(BIN_DIR, 'gstack-version-bump'), 'write', '--version', plan.newVersion], { cwd: staging, encoding: 'utf8', timeout: 120_000, env });
     if (w.status !== 0) { v.status = 'failed'; v.detail = (w.stderr ?? '').trim().slice(0, 300); throw new Refusal('RESTAMP_VERSION_SOURCE', `gstack-version-bump write failed: ${v.detail}; nothing written`); }
     v.status = 'done'; v.detail = `wrote ${plan.newVersion}`;
   }
@@ -509,9 +520,9 @@ export function restamp(o: RestampOptions): RestampResult {
       if (dirty.length) throw new Refusal('RESTAMP_CONFLICT', `restamp_command needs a clean HEAD, index and worktree (it runs on a clean checkout of HEAD); commit or remove: ${dirty.slice(0, 10).join(', ')}${dirty.length > 10 ? ' …' : ''}; nothing written`);
     }
 
-    const wt = spawnSync(path.join(BIN_DIR, 'gstack-wtree'), [], { cwd: o.repoRoot, encoding: 'utf8', timeout: 60_000 });
-    const wtree = (wt.stdout ?? '').trim();
-    if (wt.status !== 0 || !/^[0-9a-f]{40,64}$/.test(wtree)) throw new Refusal('RESTAMP_CONFLICT', `cannot fingerprint the working tree (${(wt.stderr ?? '').trim()}); nothing written`);
+    const fp = wtreeFingerprint({ cwd: o.repoRoot });
+    if ('error' in fp) throw new Refusal('RESTAMP_CONFLICT', `cannot fingerprint the working tree (${fp.error}); nothing written`);
+    const wtree = fp.tree;
     staging = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-restamp-staging-'));
     fs.rmSync(staging, { recursive: true, force: true });
     const add = git(o.repoRoot, ['worktree', 'add', '--detach', '-q', staging, 'HEAD']);
@@ -567,7 +578,9 @@ function gateAhead(o: RestampOptions, plan: Plan, stages: StageRecord[], common:
     if (resolvable) {
       for (const c of conflicts) {
         if (c === plan.policy.changelog) {
-          const merged = mergeChangelogs(git(dir, ['show', `:2:${c}`]).out + '\n', git(dir, ['show', `:3:${c}`]).out + '\n');
+          const stage = (n: number) => git(dir, ['show', `:${n}:${c}`]);
+          const [base, ours, theirs] = [stage(1), stage(2), stage(3)];
+          const merged = ours.ok && theirs.ok ? mergeChangelogs(ours.out + '\n', theirs.out + '\n', base.ok ? base.out + '\n' : undefined) : null;
           if (merged === null) { unresolved = [c]; break; }
           fs.writeFileSync(path.join(dir, c), merged);
         } else git(dir, ['checkout', '--theirs', '--', c]);
@@ -588,7 +601,7 @@ function gateAhead(o: RestampOptions, plan: Plan, stages: StageRecord[], common:
   if (!commit.ok) { removeWorktree(o.repoRoot, dir); throw new Refusal('RESTAMP_CONFLICT', `cannot commit the gate-ahead stamp: ${commit.err}`); }
   const gatedHead = git(dir, ['rev-parse', 'HEAD']).out;
   const gatedTree = git(dir, ['rev-parse', 'HEAD^{tree}']).out;
-  const slug = spawnSync(path.join(BIN_DIR, 'gstack-slug'), [], { cwd: o.repoRoot, encoding: 'utf8', timeout: 30_000 });
+  const slug = runScriptSync(path.join(BIN_DIR, 'gstack-slug'), [], { cwd: o.repoRoot, encoding: 'utf8', timeout: 30_000 });
   const branchKey = /^BRANCH=(.+)$/m.exec(slug.stdout ?? '')?.[1]?.trim() ?? git(o.repoRoot, ['branch', '--show-current']).out;
   const record: GateAheadRecord = {
     schema_version: 1, pr: o.pr ?? null, predecessor_pr: pred.pr, predecessor_head: pred.head, branch_head: branchHead, gated_head: gatedHead,

@@ -40,6 +40,7 @@ function runStart(args: string[] = [], env: Record<string, string> = {}): string
       PATH: process.env.PATH!,
       HOME: tmpHome,
       GSTACK_HOME: tmpGstackHome,
+      GSTACK_LEASE_DIR: path.join(tmpGstackHome, 'leases'),
       ...env,
     },
   });
@@ -79,6 +80,7 @@ const PROSE_REFERENCED_KEYS = [
   'SKILL_PREFIX',
   'REPO_MODE',
   'SESSION_KIND',
+  'CAPY',
   'ACTIVATED',
   'FIRST_LOOP_SHOWN',
   'FIRST_TASK',
@@ -151,6 +153,7 @@ describe('gstack-skill-start behavior', () => {
       try {
         const output = runStart([], {
           GSTACK_HOME: state,
+          GSTACK_LEASE_DIR: path.join(state, 'leases'),
           GSTACK_CHECKPOINT_MODE: 'continuous',
           GSTACK_CHECKPOINT_PUSH: 'true',
         });
@@ -161,6 +164,22 @@ describe('gstack-skill-start behavior', () => {
       } finally { fs.rmSync(state, { recursive: true, force: true }); }
     });
   }
+
+  test('Capy: CAPY on prints the capy-asks block once; off and GSTACK_CAPY_ASKS=0 print none', () => {
+    const blocks = (out: string) => (out.match(/^GSTACK_INSTRUCTION_BEGIN: (\S+)/gm) ?? []).map((h) => h.replace(/^GSTACK_INSTRUCTION_BEGIN: /, ''));
+    const on = runStart([], { GSTACK_CAPY: '1' });
+    expect(on).toMatch(/^CAPY: on$/m);
+    expect(blocks(on).filter((b) => b === 'capy-asks')).toHaveLength(1);
+    expect(on).toContain('needs-you report to your Captain');
+    expect(on).toContain('gstack-owner-brief render --captain --out <run dir>');
+    expect(on).toContain('gstack-approvals add');
+    const off = runStart();
+    expect(off).toMatch(/^CAPY: off$/m);
+    expect(blocks(off)).not.toContain('capy-asks');
+    const quiet = runStart([], { GSTACK_CAPY: '1', GSTACK_CAPY_ASKS: '0' });
+    expect(quiet).toMatch(/^CAPY: on \(asks block off: GSTACK_CAPY_ASKS=0\)$/m);
+    expect(blocks(quiet)).not.toContain('capy-asks');
+  });
 
   test('sanitizes GSTACK_INSTRUCTION markers out of passthrough output (OV4)', () => {
     // Poison the learnings passthrough: >5 entries triggers learnings-search
@@ -182,7 +201,7 @@ describe('gstack-skill-start behavior', () => {
         timeout: 30_000,
         encoding: 'utf-8',
         cwd: tmpHome,
-        env: { PATH: process.env.PATH!, HOME: tmpHome, GSTACK_HOME: tmpGstackHome },
+        env: { PATH: process.env.PATH!, HOME: tmpHome, GSTACK_HOME: tmpGstackHome, GSTACK_LEASE_DIR: path.join(tmpGstackHome, 'leases') },
       });
       // The poisoned marker must be neutralized...
       expect(out).not.toContain('GSTACK_INSTRUCTION_BEGIN: evil');
@@ -230,7 +249,7 @@ describe('gstack-skill-start behavior', () => {
     const state = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-ss-pid-'));
     fs.writeFileSync(path.join(state, 'config.yaml'), 'update_check: false\n');
     try {
-      const env = { PATH: process.env.PATH!, HOME: tmpHome, GSTACK_HOME: state, START };
+      const env = { PATH: process.env.PATH!, HOME: tmpHome, GSTACK_HOME: state, GSTACK_LEASE_DIR: path.join(state, 'leases'), START };
       for (const command of ['"$START" --skill t; true', 'sh -c \'"$START" --skill t; true\'; true']) {
         const out = execFileSync('bash', ['-c', command], { timeout: 30_000, encoding: 'utf-8', cwd: tmpHome, env });
         expect(out).toMatch(new RegExp(`^SESSION_ID: ${process.pid}-`, 'm'));
@@ -329,7 +348,7 @@ describe('gstack-skill-start behavior', () => {
       expect(out.match(/GUARD_NOT_INSTALLED/g)).toHaveLength(1);
       const ids = (out.match(/^GSTACK_INSTRUCTION_BEGIN: (\S+)/gm) ?? []).map((h) => h.replace(/^GSTACK_INSTRUCTION_BEGIN: /, ''));
       expect(ids).toEqual(['unattended-session']);
-      expect(out).toContain('GSTACK_RESULT: skill=<name> status=gate_pending run=<dir>');
+      expect(out).toContain('GSTACK_RESULT: skill=autoplan status=gate_pending run=<dir>');
       expect(out).toMatch(/never approve/i);
       expect(out).toMatch(/^FIRST_TASK: $/m);
       expect(out).not.toContain('.telemetry-prompted');
@@ -358,6 +377,60 @@ describe('gstack-skill-start behavior', () => {
       fs.rmSync(freshGh, { recursive: true, force: true });
     }
   });
+
+  test('unattended block promises GSTACK_RESULT only to skills that write it; the rest name their record (#3281)', () => {
+    const block = (skill: string) => {
+      const out = runStart(['--skill', skill], { GSTACK_SESSION_KIND: 'unattended' });
+      const m = out.match(/^GSTACK_INSTRUCTION_BEGIN: unattended-session .*\n([\s\S]*?)\nGSTACK_INSTRUCTION_END$/m);
+      expect(m).not.toBeNull();
+      return m![1];
+    };
+    const blocks = Object.fromEntries(['autoplan', 'eval-plan', 'ship', 'review', 'qa', 'investigate'].map((s) => [s, block(s)]));
+    for (const text of Object.values(blocks)) {
+      expect(text).not.toContain('skill=<name>');
+      expect(text).toMatch(/never choose them/);
+      expect(text).toMatch(/never approve a gate/);
+      expect(text).toMatch(/never publish, push, sync or send data off this machine/);
+    }
+    const autoplan = blocks.autoplan;
+    expect(autoplan).toContain('`GSTACK_RESULT: skill=autoplan status=gate_pending run=<dir>`');
+    expect(autoplan).toContain('gate list (gstack-gate render)');
+    expect(autoplan).toMatch(/decisions\.jsonl with kind "auto"/);
+    expect(autoplan).toContain('gate.json');
+    const evalPlan = blocks['eval-plan'];
+    expect(evalPlan).toContain('`GSTACK_RESULT: skill=eval-plan status=gate_pending run=<outdir>`');
+    expect(evalPlan).toContain('No helper writes a gate.json');
+    expect(evalPlan).not.toContain('gate list');
+    const records: Record<string, string> = {
+      ship: 'gstack-ship-receipt read --pr <n> --json',
+      review: 'gstack-review-read',
+      qa: 'qa-report-*.md',
+      investigate: "this skill's own record (docs/unattended.md)",
+    };
+    for (const [skill, record] of Object.entries(records)) {
+      const text = blocks[skill];
+      expect(text).toContain('writes no run directory and prints no GSTACK_RESULT line');
+      expect(text).toContain(record);
+      expect(text).not.toContain('GSTACK_RESULT: skill=');
+      expect(text).not.toContain('gate list');
+      expect(text).not.toContain('decisions.jsonl');
+      expect(text).not.toContain('run.json');
+    }
+  }, 60_000);
+
+  test('unattended /ship alone prints the UNATTENDED_SHIP status line naming the receipt file (GSTA-88)', () => {
+    const line = /^UNATTENDED_SHIP: no push, no PR; Step 18 takes the handoff section; receipt at \.gstack\/tmp\/ship-receipt\.md$/gm;
+    const ship = runStart(['--skill', 'ship'], { GSTACK_SESSION_KIND: 'unattended' });
+    expect(ship.match(line)).toHaveLength(1);
+    expect((ship.match(/^GSTACK_INSTRUCTION_BEGIN: (\S+)/gm) ?? []).map((h) => h.replace(/^GSTACK_INSTRUCTION_BEGIN: /, ''))).toEqual(['unattended-session']);
+    expect(ship).toContain('.gstack/tmp/ship-receipt.md when nothing was pushed');
+    for (const skill of ['review', 'qa', 'autoplan']) {
+      expect(runStart(['--skill', skill], { GSTACK_SESSION_KIND: 'unattended' })).not.toContain('UNATTENDED_SHIP');
+    }
+    for (const kind of ['interactive', 'spawned', 'headless']) {
+      expect(runStart(['--skill', 'ship'], { GSTACK_SESSION_KIND: kind })).not.toContain('UNATTENDED_SHIP');
+    }
+  }, 60_000);
 
   test('unattended session makes no egress call even with telemetry and artifacts sync enabled and a queue pending (plan B1)', () => {
     // Shadow bin: every helper is the real one except the egress sinks, which
@@ -487,7 +560,7 @@ describe('gstack-skill-start behavior', () => {
     fs.writeFileSync(path.join(freshGh, 'config.yaml'), 'update_check: false\n');
 
     const localStart = path.join(projectSkillRoot, 'bin', 'gstack-skill-start');
-    const env = { PATH: process.env.PATH!, HOME: tmpHome, GSTACK_HOME: freshGh };
+    const env = { PATH: process.env.PATH!, HOME: tmpHome, GSTACK_HOME: freshGh, GSTACK_LEASE_DIR: path.join(freshGh, 'leases') };
     try {
       const overlay = execFileSync(localStart, ['--skill', 'testskill'], {
         timeout: 30_000,
@@ -609,8 +682,9 @@ describe('ARTIFACTS_SYNC attention lines (sync status table)', () => {
     status: code, held_count: 0, drainable: 0, last_drain_at: NOW(), last_push_at: NOW(), ts: NOW(), held: [], message: 'm', ...extra,
   });
 
-  const FIXTURES: Record<string, { status: () => Record<string, unknown>; queued?: number; n?: number }> = {
+  const FIXTURES: Record<string, { status: () => Record<string, unknown>; queued?: number; n?: number; names?: string }> = {
     held: { status: () => status('held', { held_count: 2 }), n: 2 },
+    'case-collision': { status: () => status('collision', { case_held: 2, case_names: 'MyApp,myapp' }), n: 2, names: 'MyApp,myapp' },
     blocked: { status: () => status('blocked') },
     push_failed: { status: () => status('push_failed') },
     error: { status: () => status('error') },
@@ -638,7 +712,7 @@ describe('ARTIFACTS_SYNC attention lines (sync status table)', () => {
       expect(fx).toBeDefined();
       const gh = syncHome(fx.status(), fx.queued ?? 0);
       try {
-        const expected = row.line.replaceAll('<bin>', SYNC).replaceAll('<N>', String(fx.n ?? 0));
+        const expected = row.line.replaceAll('<bin>', SYNC).replaceAll('<N>', String(fx.n ?? 0)).replaceAll('<names>', fx.names ?? '');
         expect(attention(runStart([], { GSTACK_HOME: gh }))).toEqual([expected]);
       } finally {
         fs.rmSync(gh, { recursive: true, force: true });
@@ -689,7 +763,7 @@ describe('ARTIFACTS_SYNC attention lines (sync status table)', () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-ss-sync-home-'));
     const gh = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-ss-sync-gh-'));
     const remote = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-ss-sync-remote-'));
-    const env = { PATH: process.env.PATH!, HOME: home, GSTACK_HOME: gh };
+    const env = { PATH: process.env.PATH!, HOME: home, GSTACK_HOME: gh, GSTACK_LEASE_DIR: path.join(gh, 'leases') };
     const bin = (name: string, args: string[]) =>
       execFileSync(path.join(ROOT, 'bin', name), args, { timeout: 30_000, encoding: 'utf-8', cwd: home, env, stdio: 'pipe' });
     const remoteFiles = () => execFileSync('git', ['--git-dir=' + remote, 'ls-tree', '-r', '--name-only', 'main'], { encoding: 'utf-8', timeout: 30_000 });
@@ -736,7 +810,7 @@ describe('gstack-skill-end', () => {
     const out = execFileSync(
       END,
       ['--skill', 't', '--outcome', 'success', '--session-id', 'sid-1', '--tel-start', String(start)],
-      { timeout: 30_000, encoding: 'utf-8', cwd: tmpHome, env: { PATH: process.env.PATH!, HOME: tmpHome, GSTACK_HOME: tmpGstackHome } },
+      { timeout: 30_000, encoding: 'utf-8', cwd: tmpHome, env: { PATH: process.env.PATH!, HOME: tmpHome, GSTACK_HOME: tmpGstackHome, GSTACK_LEASE_DIR: path.join(tmpGstackHome, 'leases') } },
     );
     const m = out.match(/SKILL_END: recorded outcome=success duration_s=(\d+)/);
     expect(m).not.toBeNull();
@@ -760,7 +834,7 @@ describe('gstack-skill-end', () => {
       timeout: 30_000,
       encoding: 'utf-8',
       cwd: tmpHome,
-      env: { PATH: process.env.PATH!, HOME: tmpHome, GSTACK_HOME: tmpGstackHome },
+      env: { PATH: process.env.PATH!, HOME: tmpHome, GSTACK_HOME: tmpGstackHome, GSTACK_LEASE_DIR: path.join(tmpGstackHome, 'leases') },
     });
     expect(fs.existsSync(pending)).toBe(false);
   });
@@ -797,7 +871,7 @@ describe('gstack-skill-start install admission', () => {
   };
   const start = (gh: string, skill: string, env: Record<string, string>, bin = START) => spawnSync(bin, ['--skill', skill], {
     timeout: 30_000, encoding: 'utf-8', cwd: tmpHome,
-    env: { PATH: process.env.PATH!, HOME: tmpHome, GSTACK_HOME: gh, ...env },
+    env: { PATH: process.env.PATH!, HOME: tmpHome, GSTACK_HOME: gh, GSTACK_LEASE_DIR: path.join(gh, 'leases'), ...env },
   });
 
   test('unattended with Bun 1.3.14 first on PATH: the runtime row with its fix, status=refused, exit 3; interactive keeps running', () => {
@@ -858,7 +932,7 @@ describe('gstack-skill-start install admission', () => {
     const elsewhere = verdict(gh, {}, path.join(gh, 'named.json'));
     fs.rmSync(path.join(gh, 'install-verdicts'), { recursive: true, force: true });
     expect(start(gh, 'autoplan', { ...capy, GSTACK_INSTALL_VERDICT: elsewhere }).status).toBe(0);
-  });
+  }, 20_000);
 
   test('an installed runtime root follows its .source-path to the source checkout for the verdict and HEAD', () => {
     const gh = scratch();
@@ -870,5 +944,28 @@ describe('gstack-skill-start install admission', () => {
     const r = start(gh, 'autoplan', { GSTACK_SESSION_KIND: 'unattended', GSTACK_CAPY: '1' }, path.join(runtime, 'bin/gstack-skill-start'));
     expect(r.status, r.stdout + r.stderr).toBe(0);
     expect(r.stdout).toContain('INSTALL_VERDICT: ok');
+  });
+});
+
+
+// PR gate run 38969924945 (ship-docsync-store): an agent ran `gstack-skill-start --help`
+// to learn the interface, and the script started an interactive session instead.
+describe('lifecycle --help', () => {
+  test.each([['gstack-skill-start', START], ['gstack-skill-end', END]])('%s --help prints usage and writes no state', (name, bin) => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-help-home-'));
+    const state = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-help-state-'));
+    try {
+      const out = execFileSync(bin, ['--help'], {
+        timeout: 30_000, encoding: 'utf-8', cwd: home,
+        env: { PATH: process.env.PATH!, HOME: home, GSTACK_HOME: state, GSTACK_STATE_ROOT: state, GSTACK_LEASE_DIR: path.join(state, 'leases') },
+      });
+      expect(out.split('\n')[0]).toStartWith(`Usage: ${name} --skill NAME`);
+      expect(out).not.toMatch(/^(?:SKILL_START_PROTO|SESSION_ID|SESSIONS):/m);
+      expect(fs.readdirSync(home)).toEqual([]);
+      expect(fs.readdirSync(state)).toEqual([]);
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+      fs.rmSync(state, { recursive: true, force: true });
+    }
   });
 });

@@ -13,7 +13,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { EXIT } from '../lib/headless-artifacts';
-import { REALITY_ROWS, REALITY_SCOPES, TIER1_ROW_IDS, checkPlanReality, checkRealityRows, parseRealityLines, parseScopes, renderIncidentTable, renderRows, requiredRows } from '../lib/plan-reality';
+import { PLAN_REALITY_CHECKER, REALITY_ROWS, REALITY_SCOPES, TIER1_ROW_IDS, checkPlanReality, checkRealityRows, parseRealityLines, parseScopes, renderIncidentTable, renderRows, requiredRows, vaguePlanTerms } from '../lib/plan-reality';
 import { extractHeading } from '../lib/autoplan-prompts';
 import { RESULT_CODES } from '../lib/result-codes';
 import { generatePlanRealityRows } from '../scripts/resolvers/plan-reality';
@@ -183,6 +183,28 @@ describe('gstack-plan-reality bin', () => {
   });
 });
 
+describe('captured tier 1 n/a (plan-mode-no-op, paid run 39004466422)', () => {
+  // The named-target plan-eng-review session marked deferred-asks n/a, check returned repair, and the repair loop ran
+  // past the 300 s capture before the first question.
+  const captured = 'REALITY: deferred-asks n/a no linked issue; the plan cites no request to compare against package.json:2';
+  test('check rejects the captured line as a missing row, and the skill text forbids it', () => {
+    const others = Object.entries(FIXTURE.rows).filter(([id]) => id !== 'deferred-asks').map(([, row]) => row.positive).join('\n');
+    const rejected = run(['check', '--phase', 'eng', '-'], `${others}\n${captured}\n`);
+    expect(rejected.code).toBe(EXIT.fail);
+    expect(rejected.out).toMatch(/^PLAN_REALITY: phase=eng rows=6\/7 missing=deferred-asks .*verdict=repair$/m);
+    expect(rejected.err).toContain('(REALITY_ROW_MISSING)');
+    const repaired = run(['check', '--phase', 'eng', '-'], `${others}\n${captured.replace(' n/a ', ' pass ')}\n`);
+    expect(repaired.out).toMatch(/^PLAN_REALITY: phase=eng rows=7\/7 missing=none .*verdict=complete$/m);
+    const rule = 'tier 1 always, never `n/a`: premise-table, already-done, surface-check, binding-decisions, numbers, deferred-asks, pr-count; tier 2 by detected scope, `--scope <csv>`). Every row cites a file:line receipt (with no linked issue, deferred-asks is `pass`)';
+    for (const phase of ['plan-eng-review', 'plan-ceo-review', 'plan-devex-review']) {
+      expect(generatePlanRealityRows({ skillName: phase, host: 'claude', paths: {} } as unknown as TemplateContext).replace(/\s+/g, ' ')).toContain(rule);
+    }
+    for (const rel of ['plan-eng-review/sections/review-sections.md', 'plan-ceo-review/SKILL.md']) {
+      expect(fs.readFileSync(path.join(ROOT, rel), 'utf8').replace(/\s+/g, ' ')).toContain(rule);
+    }
+  });
+});
+
 describe('rendered templates carry the contract', () => {
   const read = (rel: string) => fs.readFileSync(path.join(ROOT, rel), 'utf8');
   const ctx = (skillName: string) => ({ skillName, host: 'claude', paths: {} } as unknown as TemplateContext);
@@ -309,5 +331,59 @@ describe('field wave item 12: a receipt per measured number, the rule text for a
     expect(r.unquoted).toEqual([]);
     expect(r.unreceipted_numbers.length).toBeGreaterThan(0);
     expect(r.unreceipted_numbers.length).toBeLessThanOrEqual(6);
+  });
+});
+
+describe('next wave B6/B10: PLAN_REALITY flags without false positives; plan quotes need no receipt', () => {
+  const others = (id: string) => Object.entries(FIXTURE.rows).filter(([k]) => k !== id).map(([, r]) => r.positive).join('\n');
+
+  test('B6: item and section references are not quantities; a phrase in backticks is named, not claimed (plan scope)', () => {
+    const plan = "B1. `rec`: one word takes every recommendation (item 5).\nB6. When the plan names `minimum effect`, `margin`, `decision rule` or a dollar cost, the gate flags it (items 10, 14–19; section 3).\n";
+    const r = checkPlanReality(plan);
+    expect(r.unreceipted_numbers).toEqual([]);
+    expect(r.unquoted).toEqual([]);
+    expect(checkPlanReality('Startup takes roughly 9 s on a cold machine.\n').unreceipted_numbers).toEqual(['Startup takes roughly 9 s on a cold machine.']);
+    expect(checkPlanReality('The decision rule was written first.\n').unquoted).toEqual(['The decision rule was written first.']);
+    expect(PLAN_REALITY_CHECKER).toBe('plan-reality/3');
+  });
+
+  test('B-f negative control: a measured number inside backticks in review scope stays flagged; a command in backticks still receipts', () => {
+    const quiet = 'REALITY: numbers pass the cold install took `86 s` on Capy';
+    expect(checkRealityRows(`${others('numbers')}\n${quiet}`, { phase: 'eng' }).unreceipted_numbers).toEqual(['the cold install took `86 s` on Capy']);
+    const cmd = 'REALITY: numbers pass the cold install took 86 s `bun run bench --json` on Capy';
+    expect(checkRealityRows(`${others('numbers')}\n${cmd}`, { phase: 'eng' }).unreceipted_numbers).toEqual([]);
+  });
+
+  test('B10: in reviewer scope a number quoted verbatim from the reviewed plan needs no receipt; a reworded or unknown quote does', () => {
+    const plan = 'Add exponential backoff: base 500 ms, factor 2, cap 30 s, jitter 10%.\n';
+    const quoted = 'REALITY: numbers pass the plan says "base 500 ms, factor 2, cap 30 s" and gives no reason for the cap (plan.md:1)';
+    expect(checkRealityRows(`${others('numbers')}\n${quoted}`, { phase: 'eng', planText: plan }).unreceipted_numbers).toEqual([]);
+    expect(checkRealityRows(`${others('numbers')}\n${quoted}`, { phase: 'eng' }).unreceipted_numbers.length).toBeGreaterThan(0);
+    const reworded = 'REALITY: numbers pass the plan says "a 45 s cap" and gives no reason';
+    expect(checkRealityRows(`${others('numbers')}\n${reworded}`, { phase: 'eng', planText: plan }).unreceipted_numbers.length).toBe(1);
+    const own = 'REALITY: numbers pass the plan says "cap 30 s"; retries took 900 ms in my run';
+    expect(checkRealityRows(`${others('numbers')}\n${own}`, { phase: 'eng', planText: plan }).unreceipted_numbers).toEqual(['retries took 900 ms in my run']);
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'plan-reality-quote-'));
+    fs.writeFileSync(path.join(dir, 'plan.md'), plan);
+    const bin = run(['check', '--phase', 'eng', '--plan', path.join(dir, 'plan.md'), '-'], `${others('numbers')}\n${quoted}`);
+    expect(bin.code, bin.err).toBe(EXIT.ok);
+    expect(run(['check', '--phase', 'eng', '-'], `${others('numbers')}\n${quoted}`).code).toBe(EXIT.fail);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  test('B6: vaguePlanTerms flags minimum effect, margin, decision rule and dollar cost only without a number, arm list or rule body', () => {
+    const plan = [
+      'Ship when the minimum effect is reached.',
+      'Keep a safety margin on the spend.',
+      'A margin of 15% over the pilot price.',
+      'The decision rule:',
+      '- arm A: keep the default',
+      '- arm B: switch',
+      'We price the dollar cost later (item 9).',
+      'The decision rule is "stop when recall drops below the base".',
+      'Name `minimum effect` in the template.',
+      '```', 'margin inside a fence', '```',
+    ].join('\n');
+    expect(vaguePlanTerms(plan).map(v => [v.phrase, v.line])).toEqual([['minimum effect', 1], ['margin', 2], ['dollar cost', 7]]);
   });
 });

@@ -33,12 +33,28 @@ export interface PregateContext {
   touched: TouchedFile[];
   config: PregateConfig;
   configLabel: string;
+  /** The policy file to edit: the user-owned path when it is the active policy, else `.gstack/pregate.json`. */
+  configFile: string;
+  /** sha256 of the user-owned policy's bytes when it is active; recorded as `inputs.policy` (a base copy is pinned by `inputs.base`). */
+  configDigest?: string;
+  /** The user-owned policy path looked for and absent under the defaults; recorded so verify can tell when one appears. */
+  absentUserPolicy?: string;
   registry: Registry;
   registryLabel: string;
   lanes: Lane[];
   platform: NodeJS.Platform;
   allowRepoCommands: boolean;
   timeoutMs: number;
+  /** No output for this long kills a test-tier process group (`--stall-timeout`, `stall_timeout_s`); 0 disables. */
+  stallTimeoutMs: number;
+  /** Live stderr lines: per-file progress, heartbeats, the stage result. */
+  progress: (line: string) => void;
+  /** CPU count and `gstack-config test_backend`: under 8 cores a configured remote gate records an obligation instead of running locally. */
+  cores: number;
+  testBackend: string;
+  policyFrom: 'base' | 'head';
+  /** `--remote`: run the declared remote gate now, under this spend cap. */
+  remote: { spendCapUsd: number } | null;
   env: NodeJS.ProcessEnv;
   /** `--explain`: checks append provenance lines here. */
   explain: string[];
@@ -55,6 +71,8 @@ export interface RemoteObligation {
   /** What clears it: a run URL or an evidence-bundle lane label, recorded by `gstack-pregate clear`. */
   receipt: string | null;
   cleared_by?: string;
+  /** The exact command that discharges the obligation (a small machine's remote gate). */
+  command?: string;
 }
 
 export interface CheckResult extends PregateCheck {
@@ -78,5 +96,5 @@ export interface CheckDef {
   downgradable: boolean;
   /** True when the check executes commands the repo declares (pin files or its test runner). */
   needsRepoCommands: boolean;
-  run(ctx: PregateContext): CheckResult;
+  run(ctx: PregateContext): CheckResult | Promise<CheckResult>;
 }

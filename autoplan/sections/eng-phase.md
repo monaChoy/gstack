@@ -78,7 +78,7 @@ if [ "$_OUTSIDE_EXIT" -eq 124 ]; then
 fi
 cat "$_OUTSIDE_TMP/stderr" >&2 || { [ "$_OUTSIDE_EXIT" -ne 0 ] || _OUTSIDE_EXIT=1; }
 _OUTSIDE_RC=0
-bun "$HOME/.claude/skills/gstack/lib/outside-review-result.ts" --label 'Codex outside review' --exit "$_OUTSIDE_EXIT" --stderr "$_OUTSIDE_TMP/stderr" --events "$_OUTSIDE_TMP/events" review "$_OUTSIDE_TMP/text" || _OUTSIDE_RC=$?
+bun --no-env-file --config=/dev/null "$HOME/.claude/skills/gstack/lib/outside-review-result.ts" --label 'Codex outside review' --exit "$_OUTSIDE_EXIT" --stderr "$_OUTSIDE_TMP/stderr" --events "$_OUTSIDE_TMP/events" review "$_OUTSIDE_TMP/text" || _OUTSIDE_RC=$?
 case "$_OUTSIDE_RC" in
   0|3) ;;
   4) echo 'OUTSIDE_STATUS: unverified provider=codex host=claude'; exit 4 ;;
@@ -105,7 +105,7 @@ Retain the historical review-log skill ID; add `"host":"claude","outside_provide
 1. Step 0 (Scope Challenge): Read actual code referenced by the plan. Map each
    sub-problem to existing code. Run the complexity check. Produce concrete findings.
    Reality rows: the loaded skill's `REALITY:` lines, one per applicable row;
-   `~/.claude/skills/gstack/bin/gstack-plan-reality check --phase eng <review-file|->` prints `PLAN_REALITY: … verdict=complete` before the phase closes
+   `~/.claude/skills/gstack/bin/gstack-plan-reality check --phase eng --plan <reviewed snapshot> <review-file|->` prints `PLAN_REALITY: … verdict=complete` before the phase closes
    (unattended: `incomplete` keeps it open).
 
 2. Step 0.5 (Dual Voices): Present the completed calls above under Codex SAYS

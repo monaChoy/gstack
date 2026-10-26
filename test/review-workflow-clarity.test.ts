@@ -1,5 +1,7 @@
 import { expect, test } from 'bun:test';
-import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { generateReviewArmy } from '../scripts/resolvers/review-army';
 import { generateCrossReviewDedup, generateSharedCodeReuse, generateScopeDrift } from '../scripts/resolvers/review-scope';
@@ -227,7 +229,8 @@ test('review finalization ownership: initialize invocation state and capture the
   expect(flat).toMatch(/REVIEW_START for this core candidate before reading its diff/i);
   expectMentions(flat, [['never', 'reading', 'before']], 'flat');
   expect(flat).toMatch(/separate PASS_START tokens, not REVIEW_START/);
-  expectMentions(flat, [['only', 'finishes', 'final']], 'flat');
+  expect(flat).toContain('After an edited pass, start the next with `--start review --fix-range`');
+  expect(flat).toContain('On refusal, start a full pass.');
 });
 
 test('review finalization ownership: late findings use Fix-First before the bounded parent transition', () => {
@@ -238,7 +241,7 @@ test('review finalization ownership: late findings use Fix-First before the boun
     'Structured approval does not waive advisory/test_stub ASK gates',
     '## Step 5.8: Persist Eng Review result',
     'Edited: increment CYCLES once',
-    'No edits: fill the record below',
+    'No edits: after a full pass, fill the record below',
     '### 2. Fill the record',
     '--finish REVIEW_START',
   ];
@@ -246,7 +249,7 @@ test('review finalization ownership: late findings use Fix-First before the boun
   expect(positions.every(position => position >= 0)).toBe(true);
   expect(positions).toEqual([...positions].sort((a, b) => a - b));
   expect(flat).toContain('at most 3 fix cycles');
-  expect(flat).toContain('At 3, persist `converged:false`');
+  expect(flat).toContain('Edited: increment CYCLES once, then fill and save the record below with `converged:false`.');
   const limit = flat.slice(flat.indexOf('At 3,'), flat.indexOf('No edits:'));
   expect(limit).toMatch(/then stop this invocation/i);
   expectMentions(limit, [['without', 'summary', 'fourth']], 'limit');
@@ -274,14 +277,14 @@ test('review finalization ownership: required native completion and optional out
   expect(flat).toContain('`CONVERGED`: true only for a completed zero-edit pass');
 });
 
-test('review finalization ownership: finish only the final core token without log-time capture', () => {
+test('review finalization ownership: each logged pass finishes its own core token without log-time capture', () => {
   const step = skill.slice(skill.indexOf('## Step 5.8: Persist Eng Review result'));
   const flat = step.replace(/\s+/g, ' ');
   expect(step.match(/--finish REVIEW_START/g)).toHaveLength(1);
   expect(step).not.toContain('--start review');
   expect(step).not.toContain('--finish PASS_START');
   expect(flat).toMatch(/never invent a binding or replace REVIEW_START at log time/i);
-  expectMentions(flat, [['only', 'finish', 'final']], 'flat');
+  expect(flat).toContain("finish only this pass's own token");
   expect(step).toContain('"completed":COMPLETED,"converged":CONVERGED,"cycles":CYCLES');
 });
 
@@ -359,6 +362,70 @@ for (const skillName of ['review', 'ship']) {
     host: 'claude', paths: HOST_PATHS.claude };
   const army = generateReviewArmy(ctx);
   const flat = army.replace(/\s+/g, ' ');
+
+  // PR gate run 38981523623 (ship-exploratory-plan-checks): the block sourced the scope signals
+  // without printing them, so the agent appended its own echo to see SCOPE_FRONTEND.
+  test(`${skillName} clarity: the scope block prints every signal specialist selection reads`, () => {
+    const block = between(army, '### Detect stack and scope', '### Read specialist hit rates');
+    expect(block).toContain("/gstack-diff-scope <base> 2>/dev/null) || true\nset | grep '^SCOPE_'\n");
+    const selection = between(army, '### Select specialists', '### Adaptive gating');
+    const used = [...new Set(selection.match(/SCOPE_[A-Z_]+/g))];
+    expect(used.length).toBeGreaterThan(0);
+    const flags = between(readFileSync(join(root, 'bin/gstack-diff-scope'), 'utf8'), '_print_flags() {', '}');
+    for (const signal of used) {
+      if (flags.includes(`echo "${signal}=`)) continue;
+      // PR gate run 39002269281: a signal gstack-diff-scope does not print comes from a detect helper the scope
+      // block itself runs, never from a command named only in selection prose.
+      const helper = /bin\/(gstack-[a-z-]+) detect\b/.exec(block.split('\n').find(line => line.includes(signal))!)?.[1];
+      expect(helper, signal).toBeDefined();
+      expect(readFileSync(join(root, 'bin', helper!), 'utf8'), signal).toContain(`${signal}=\${`);
+      expect(selection, signal).not.toMatch(/\bdetect\b/);
+    }
+  });
+
+  test(`${skillName} clarity: the state-machine signal checks the detector's exit status and fails toward dispatch`, () => {
+    const block = between(army, '### Detect stack and scope', '### Read specialist hit rates');
+    expect(block).toContain(`_SM=$(${HOST_PATHS.claude.binDir}/gstack-state-matrix detect --base <base>) || _SM=SCOPE_STATE_MACHINE=unknown; source <(echo "$_SM")\n`);
+    expect(block.indexOf('SCOPE_STATE_MACHINE=unknown')).toBeLessThan(block.indexOf("set | grep '^SCOPE_'"));
+    const selection = between(army, '### Select specialists', '### Adaptive gating').replace(/\s+/g, ' ');
+    expect(selection).toContain('9. **State Machines** — if SCOPE_STATE_MACHINE is true or unknown: read');
+    // /review delta on 51f1e02: a fixed .gstack/tmp/state-machines.md let a second review check the previous run's
+    // output (Write refuses an unread existing file) and commit it; each run now checks the new file outfile prints.
+    expect(selection).toContain('/gstack-state-matrix outfile`, Read the file it prints, write the full output there, then run `');
+    expect(selection).toContain('/gstack-state-matrix check <file>` on it.');
+    expect(selection).not.toContain('.gstack/tmp/state-machines.md');
+    expect(selection).not.toContain('<<');
+    expect(selection).not.toContain('pipe output');
+  });
+
+  test(`${skillName} clarity: the scope block run against a failing detector prints unknown and keeps its stderr`, () => {
+    const stubs = mkdtempSync(join(realpathSync(tmpdir()), 'scope-block-'));
+    try {
+      const block = /\`\`\`bash\n([\s\S]*?)\n\`\`\`/.exec(between(generateReviewArmy({ ...ctx, paths: { ...ctx.paths, binDir: stubs } }),
+        '### Detect stack and scope', '### Read specialist hit rates'))![1].replaceAll('<base>', 'main');
+      writeFileSync(join(stubs, 'gstack-diff-scope'), '#!/bin/sh\necho SCOPE_FRONTEND=false\n', { mode: 0o755 });
+      const run = (detector: string) => {
+        writeFileSync(join(stubs, 'gstack-state-matrix'), `#!/bin/sh\n${detector}\n`, { mode: 0o755 });
+        return spawnSync('bash', ['-c', block], { cwd: stubs, encoding: 'utf8', timeout: 10_000 });
+      };
+      const failed = run("echo SCOPE_STATE_MACHINE=false; echo '# no merge base with origin/main; run: git fetch origin main'; echo 'detector crashed' >&2; exit 2");
+      expect(failed.stdout).toMatch(/^SCOPE_STATE_MACHINE=unknown$/m);
+      expect(failed.stdout).not.toMatch(/^SCOPE_STATE_MACHINE=false$/m);
+      expect(failed.stderr).toContain('detector crashed');
+      expect(run('exit 127').stdout).toMatch(/^SCOPE_STATE_MACHINE=unknown$/m);
+      const silent = run("echo 'detector found no git' >&2; exit 3");
+      expect(silent.stdout).toMatch(/^SCOPE_STATE_MACHINE=unknown$/m);
+      expect(silent.stderr).toContain('detector found no git');
+      const lateFail = run("echo SCOPE_STATE_MACHINE=true; echo SCOPE_LEAK=1; exit 1");
+      expect(lateFail.stdout).toMatch(/^SCOPE_STATE_MACHINE=unknown$/m);
+      expect(lateFail.stdout).not.toContain('SCOPE_LEAK');
+      const detected = run("echo SCOPE_STATE_MACHINE=true; echo '# state-machine: src/takes.ts:4 proposal,accept'");
+      expect(detected.stdout).toMatch(/^SCOPE_STATE_MACHINE=true$/m);
+      expect(detected.stdout).toMatch(/^SCOPE_FRONTEND=false$/m);
+      expect(run('echo SCOPE_STATE_MACHINE=false').stdout).toMatch(/^SCOPE_STATE_MACHINE=false$/m);
+      expect(block).toContain("DIFF_LINES=$(git diff \"$DIFF_BASE\" --numstat | awk '{n+=$1+$2} END {print n+0}')");
+    } finally { rmSync(stubs, { recursive: true, force: true }); }
+  });
 
   test(`${skillName} clarity: terminal failure permits independent work but never certifies coverage`, () => {
     expectMentions(flat, [['confirm', 'finished', 'stopped']], 'flat');

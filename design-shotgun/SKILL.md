@@ -37,15 +37,6 @@ gbrain:
 <!-- AUTO-GENERATED from SKILL.md.tmpl — do not edit directly -->
 <!-- Regenerate: bun run gen:skill-docs -->
 
-
-## When to invoke this skill
-
-Standalone design exploration you can
-run anytime. Use when: "explore designs", "show me options", "design variants",
-"visual brainstorm", or "I don't like how this looks".
-Proactively suggest when the user describes a UI feature but hasn't seen
-what it could look like.
-
 ## Preamble (run first)
 
 ```bash
@@ -643,6 +634,9 @@ Draw on DESIGN.md, taste memory, and the user's request to make each concept dis
 exists, it decides what varies: keep its fonts and palette and vary layout and
 composition. Without one, vary font family, color palette, and layout approach. If two
 variants look like siblings, rework the weaker one with a deliberately different direction.
+For a landing, pricing or campaign screen, also vary the page archetype (classic hero,
+long-form story, minimal conversion, comparison), keep the one primary action identical,
+and caption each variant with its section outline.
 
 Concrete test: if someone could swap the headline text between two variants without
 noticing, they're too similar. Variants should feel like separate design teams made

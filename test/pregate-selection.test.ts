@@ -14,10 +14,12 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { EXIT } from '../lib/headless-artifacts';
 import { changedLiterals, constantsIn } from '../lib/pregate/checks/literals';
-import { parseSummary } from '../lib/pregate/checks/lanes';
-import { validateConfig } from '../lib/pregate/config';
+import { parseSummary, planRuns } from '../lib/pregate/checks/lanes';
+import { DEFAULT_CONFIG, validateConfig } from '../lib/pregate/config';
+import { isDocsEmptyLane } from '../lib/pregate/docs-lane';
 import { buildGraph, testsFor } from '../lib/pregate/import-graph';
 import { CHECK_IDS } from '../lib/pregate/index';
+import type { PregateContext } from '../lib/pregate/types';
 import { parseWorkflow } from '../lib/pregate/workflows';
 import { BASE_PREGATE, cleanup, commit, makeFixtureRepo, runBin, write, type FixtureRepo } from './helpers/pregate-fixture';
 
@@ -63,6 +65,132 @@ describe('import graph (static imports ∪ repo-path literals ∪ bin convention
     expect(testsFor(g, 'docs/README.md', BASE_PREGATE.dependencies)).toMatchObject({ tests: [], declaredNone: true });
     expect(testsFor(g, 'test/util.test.js').tests).toEqual(['test/util.test.js']);
   });
+
+  test('markdown a test reads maps through the same literal and join edges; an unreferenced markdown file does not', () => {
+    const repo = fixture();
+    commit(repo, {
+      'prompts/system.md': '# system\n',
+      'notes/scratch.md': '# scratch\n',
+      'test/fixtures/sample.md': '# sample\n',
+      'test/prompt-doc.test.js': "const test = require('node:test');\nconst fs = require('node:fs');\ntest('reads the prompt', () => { fs.readFileSync('prompts/system.md', 'utf8'); });\n",
+      'test/fixture-doc.test.js': "const test = require('node:test');\nconst fs = require('node:fs');\nconst path = require('node:path');\ntest('reads the fixture', () => { fs.readFileSync(path.join('test', 'fixtures', 'sample.md'), 'utf8'); });\n",
+    });
+    const g = buildGraph(repo.work);
+    expect(testsFor(g, 'prompts/system.md').tests).toEqual(['test/prompt-doc.test.js']);
+    expect(testsFor(g, 'prompts/system.md').provenance[0]).toContain('(literal)');
+    expect(testsFor(g, 'test/fixtures/sample.md').tests).toEqual(['test/fixture-doc.test.js']);
+    expect(testsFor(g, 'test/fixtures/sample.md').provenance[0]).toContain('(literal)');
+    expect(testsFor(g, 'notes/scratch.md')).toMatchObject({ tests: [], declaredNone: false });
+  });
+
+  test('#3340: an extensionless import of a .jsx, .mts or .cts file maps to that file', () => {
+    const repo = fixture();
+    commit(repo, {
+      'src/components/Foo.jsx': 'export default function Foo() { return null; }\n',
+      'src/lib/m.mts': 'export const m = 1;\n',
+      'src/lib/c.cts': 'export const c = 1;\n',
+      'test/foo.test.jsx': "import Foo from '../src/components/Foo';\nimport { m } from '../src/lib/m';\nimport { c } from '../src/lib/c';\n",
+    });
+    const g = buildGraph(repo.work);
+    for (const f of ['src/components/Foo.jsx', 'src/lib/m.mts', 'src/lib/c.cts']) {
+      expect(testsFor(g, f).tests).toEqual(['test/foo.test.jsx']);
+      expect(testsFor(g, f).provenance[0]).toContain('(import)');
+    }
+  });
+
+  test('#3340: a directory import resolves to its index.jsx, index.tsx or index.mjs, not only the dir/** fallback', () => {
+    const repo = fixture();
+    commit(repo, {
+      'src/Bar/index.jsx': 'export default 1;\n',
+      'src/Bar/other.js': 'export default 2;\n',
+      'src/Baz/index.tsx': 'export default 1;\n',
+      'src/Baz/other.js': 'export default 2;\n',
+      'src/Qux/index.mjs': 'export default 1;\n',
+      'src/Qux/other.js': 'export default 2;\n',
+      'test/dirs.test.js': "import Bar from '../src/Bar';\nimport Baz from '../src/Baz';\nimport Qux from '../src/Qux';\n",
+    });
+    const g = buildGraph(repo.work);
+    for (const f of ['src/Bar/index.jsx', 'src/Baz/index.tsx', 'src/Qux/index.mjs']) {
+      expect(testsFor(g, f).tests).toEqual(['test/dirs.test.js']);
+      expect(testsFor(g, f).provenance[0]).not.toContain('/**');
+    }
+    for (const f of ['src/Bar/other.js', 'src/Baz/other.js', 'src/Qux/other.js']) expect(testsFor(g, f).tests).toEqual([]);
+  });
+
+  test('#3340: an import through a jsconfig paths alias reaches a .jsx file; an existing .js sibling still wins', () => {
+    const repo = fixture();
+    commit(repo, {
+      'jsconfig.json': '{ "compilerOptions": { "baseUrl": ".", "paths": { "@/*": ["src/*"] } } }\n',
+      'src/ui/Button.jsx': 'export default function Button() { return null; }\n',
+      'src/ui/Card.js': 'export default 1;\n',
+      'src/ui/Card.jsx': 'export default 2;\n',
+      'test/ui.test.jsx': "import Button from '@/ui/Button';\nimport Card from '@/ui/Card';\n",
+    });
+    const g = buildGraph(repo.work);
+    expect(testsFor(g, 'src/ui/Button.jsx').tests).toEqual(['test/ui.test.jsx']);
+    expect(testsFor(g, 'src/ui/Card.js').tests).toEqual(['test/ui.test.jsx']);
+    expect(testsFor(g, 'src/ui/Card.jsx').tests).toEqual([]);
+  });
+
+  test('python: absolute, from-import submodule, relative and parenthesised imports and mock.patch targets map; stdlib, comments and docstrings do not', () => {
+    const repo = fixture();
+    commit(repo, {
+      'pkg/__init__.py': '',
+      'pkg/core.py': 'import os\nfrom pkg.util import helper\n',
+      'pkg/util.py': 'def helper():\n    return 1\n',
+      'pkg/multi.py': 'X = 1\n',
+      'pkg/patched.py': 'class Thing:\n    def run(self):\n        return 1\n',
+      'pkg/ghost.py': 'G = 1\n',
+      'pkg/sub/__init__.py': '',
+      'pkg/sub/sibling.py': 'S = 1\n',
+      'pkg/sub/leaf.py': 'from .. import core\nfrom . import sibling\n',
+      'tests/test_core.py': 'import pkg.core as core\n',
+      'tests/test_leaf.py': 'from pkg.sub import leaf\n',
+      'tests/test_multi.py': 'from pkg import (\n    multi,  # the module\n    util,\n)\nimport json, os.path\n',
+      'tests/test_patch.py': "from unittest import mock\n\n@mock.patch('pkg.patched.Thing.run')\ndef test_run(run):\n    pass\n",
+      'tests/test_ghost.py': '"""\nimport pkg.ghost\n"""\n# from pkg import ghost\nX = "from pkg import ghost"\n',
+    });
+    const g = buildGraph(repo.work);
+    expect(testsFor(g, 'pkg/core.py').tests).toEqual(['tests/test_core.py', 'tests/test_leaf.py']);
+    expect(testsFor(g, 'pkg/util.py').tests).toEqual(['tests/test_core.py', 'tests/test_leaf.py', 'tests/test_multi.py']);
+    expect(testsFor(g, 'pkg/sub/sibling.py').tests).toEqual(['tests/test_leaf.py']);
+    expect(testsFor(g, 'pkg/multi.py').tests).toEqual(['tests/test_multi.py']);
+    expect(testsFor(g, 'pkg/patched.py').provenance).toEqual(['tests/test_patch.py ← pkg/patched.py (literal)']);
+    expect(testsFor(g, 'pkg/sub/__init__.py').tests).toEqual(['tests/test_leaf.py']);
+    expect(testsFor(g, 'pkg/__init__.py').tests).toEqual(['tests/test_core.py', 'tests/test_leaf.py', 'tests/test_multi.py', 'tests/test_patch.py']);
+    expect(testsFor(g, 'pkg/ghost.py').tests).toEqual([]);
+    expect([...g.reverse.keys()].filter(k => k.endsWith('.py')).sort()).toEqual([
+      'pkg/__init__.py', 'pkg/core.py', 'pkg/multi.py', 'pkg/patched.py', 'pkg/sub/__init__.py', 'pkg/sub/leaf.py', 'pkg/sub/sibling.py', 'pkg/util.py',
+    ]);
+  });
+
+  test('python: a package and a same-named module both map, statements after ; and : map, escaped triple quotes and deep modules map, a path literal does not hide its patch target, and adversarial input stays linear', () => {
+    const repo = fixture();
+    commit(repo, {
+      'app.py': 'A = 1\n',
+      'app/__init__.py': '',
+      'pkg/__init__.py': '',
+      'pkg/core.py': 'C = 1\n',
+      'pkg/patched.py': 'class Thing:\n    pass\n',
+      'pkg.patched.Thing.run': 'a file whose name is also a patch target\n',
+      'tests/test_app.py': 'import app\n',
+      'tests/test_semicolon.py': 'import os; import pkg.core\n',
+      'tests/test_inline.py': 'def test_core():\n    if True: from pkg.core import C\n',
+      'tests/test_patch.py': "from unittest import mock\n\n@mock.patch('pkg.patched.Thing.run')\ndef test_run(run):\n    pass\n",
+      'tests/test_adversarial.py': `from ${'.'.repeat(100_000)}x\nfrom ${' '.repeat(100_000)}x\nX = '${Array.from({ length: 20_000 }, () => 'pkg').join('.')}'\n${'\\"""'.repeat(20_000)}\n`,
+      'tests/test_escaped.py': 'DOC = """text \\"""\nstill doc"""\nimport pkg.core\nTAIL = """x"""\n',
+      [`${Array.from({ length: 33 }, (_, i) => `d${i}`).join('/')}/leaf.py`]: 'L = 1\n',
+      'tests/test_deep.py': `import ${Array.from({ length: 33 }, (_, i) => `d${i}`).join('.')}.leaf\n`,
+    });
+    const g = buildGraph(repo.work);
+    expect(testsFor(g, 'app/__init__.py').tests).toEqual(['tests/test_app.py']);
+    expect(testsFor(g, 'app.py').tests).toEqual(['tests/test_app.py']);
+    expect(testsFor(g, 'pkg/core.py').tests).toEqual(['tests/test_escaped.py', 'tests/test_inline.py', 'tests/test_semicolon.py']);
+    expect(testsFor(g, `${Array.from({ length: 33 }, (_, i) => `d${i}`).join('/')}/leaf.py`).tests).toEqual(['tests/test_deep.py']);
+    expect(testsFor(g, 'pkg/patched.py').tests).toEqual(['tests/test_patch.py']);
+    expect(testsFor(g, 'pkg.patched.Thing.run').tests).toEqual(['tests/test_patch.py']);
+    expect(testsFor(g, 'pkg/__init__.py').tests).toEqual(['tests/test_adversarial.py', 'tests/test_escaped.py', 'tests/test_inline.py', 'tests/test_patch.py', 'tests/test_semicolon.py']);
+  });
 });
 
 describe('literals (pure)', () => {
@@ -88,8 +216,37 @@ describe('literals (pure)', () => {
     expect(codes({ warn: ['bogus'] })).toEqual(['PREGATE_CONFIG_INVALID:warn']);
     expect(codes({ runner: 'bun test' })).toEqual(['PREGATE_CONFIG_INVALID:runner']);
     expect(codes({ dependencies: { '../x': [] } })).toEqual(['PREGATE_CONFIG_INVALID:dependencies["../x"]']);
+    expect(codes({ empty_lanes: 'docs/**' })).toEqual(['PREGATE_CONFIG_INVALID:empty_lanes']);
+    expect(codes({ empty_lanes: ['../x'] })).toEqual(['PREGATE_CONFIG_INVALID:empty_lanes[0]']);
+    expect(codes({ empty_lanes: ['notes/**/*.md'] })).toEqual([]);
     expect(codes({ selection: { 'ci/job': 'x' } })).toEqual(['PREGATE_CONFIG_INVALID:selection["ci/job"]']);
     expect(codes({ extra: 1 })).toEqual(['PREGATE_CONFIG_INVALID:extra']);
+  });
+});
+
+describe('docs/no-tests empty lane', () => {
+  const docs = [
+    '.work/round-3-plan.md', 'pkg/.work/notes.md', 'notes/redproof.md', 'notes/REDPROOF.md',
+    'notes/round-3.red-proof.md', 'docs/evidence.md', 'docs/guide.md', 'Docs/Guide.MD',
+    'documentation/index.md', 'plans/2026-10-16.md', 'README.md', 'lib/README.md',
+    'CHANGELOG.md', 'LICENSE', 'notes/implementation-plan.md', 'notes/planning.md', 'src/plan.md',
+    'prompts/system.md', 'src/notes.md', 'src/explanation.md', 'planet.md', 'my-docs/guide.md', 'notes/scratch.md',
+  ];
+  const blocked = [
+    'lib/orphan.js', 'src/app.ts', 'bin/tool', 'scripts/gen.sh', 'notes/scratch.txt',
+    'docs/example.ts', 'test/fixtures/plan.md', 'test/plans/plan.md', '__tests__/redproof.md',
+  ];
+  test('markdown qualifies, including unmarked names; source, test trees and non-markdown do not', () => {
+    for (const file of docs) expect(isDocsEmptyLane(file)).toBe(true);
+    for (const file of blocked) expect(isDocsEmptyLane(file)).toBe(false);
+  });
+  test('empty_lanes adds documentation globs and cannot clear source code or a test-tree file', () => {
+    expect(isDocsEmptyLane('notes/scratch.txt')).toBe(false);
+    expect(isDocsEmptyLane('notes/scratch.txt', ['notes/**/*.txt'])).toBe(true);
+    expect(isDocsEmptyLane('lib/orphan.js', ['**', 'lib/**', '**/*.js'])).toBe(false);
+    expect(isDocsEmptyLane('docs/example.ts', ['docs/**'])).toBe(false);
+    expect(isDocsEmptyLane('bin/tool', ['bin/**'])).toBe(false);
+    expect(isDocsEmptyLane('test/fixtures/plan.md', ['**/*.md', 'test/**'])).toBe(false);
   });
 });
 
@@ -98,7 +255,7 @@ describe('gstack-pregate (bin)', () => {
     const repo = fixture();
     const help = runBin(repo, 'gstack-pregate', ['--help']);
     expect(help.out).toContain('Exit codes: 0 ok · 1 fail · 2 usage · 3 refused or needs a flag');
-    expect(help.out).toContain('stage 1 mechanical preflight (regen, secrets, strays, literals, guards)');
+    expect(help.out).toContain('stage 1 mechanical preflight (regen, secrets, strays, literals, timing, guards)');
     expect(help.out).toContain('stage 2 test execution (lanes)');
     expect(runBin(repo, 'gstack-pregate', ['bogus']).status).toBe(EXIT.usage);
     expect(pregate(repo, ['--only', 'hermetic']).status).toBe(EXIT.usage);
@@ -122,7 +279,7 @@ describe('gstack-pregate (bin)', () => {
     const out = readOut(repo);
     expect(out.schema_version).toBe(1);
     expect(out.tree).toMatch(/^[0-9a-f]{40}$/);
-    expect(out.checks.map((c: any) => [c.id, c.status, c.stage])).toEqual([['regen', 'pass', 'preflight'], ['secrets', 'pass', 'preflight'], ['strays', 'pass', 'preflight'], ['literals', 'pass', 'preflight'], ['guards', 'pass', 'preflight'], ['lanes', 'pass', 'tests']]);
+    expect(out.checks.map((c: any) => [c.id, c.status, c.stage])).toEqual([['regen', 'pass', 'preflight'], ['secrets', 'pass', 'preflight'], ['strays', 'pass', 'preflight'], ['literals', 'pass', 'preflight'], ['timing', 'pass', 'preflight'], ['guards', 'pass', 'preflight'], ['lanes', 'pass', 'tests']]);
     for (const c of out.checks) { expect(c.inputs.tree).toBe(out.tree); expect(typeof c.ms).toBe('number'); }
     expect(check(repo, 'lanes').inputs.command).toMatch(/^[0-9a-f]{64}$/);
     expect(out.verdict).toBe('pass');
@@ -140,6 +297,23 @@ describe('gstack-pregate (bin)', () => {
     expect(r.err).toContain('(REGEN_STALE)');
     expect(fs.readFileSync(path.join(repo.work, 'generated/digest.md'), 'utf8')).toBe('# digest v1.0.0\n');
     expect(readOut(repo).stage2_ms).toBeUndefined();
+  });
+
+  test('missing dependencies: regen is incomplete with REGEN_DEPS_MISSING and the install command, not REGEN_STALE', () => {
+    const repo = fixture({
+      registry: { entries: [{ id: 'digest', command: 'node gen.js', outputs: ['generated/**'], inputs: ['src/version.js', 'gen.js'] }] },
+      baseFiles: {
+        'package.json': JSON.stringify({ name: 'fixture', version: '1.0.0', scripts: { test: 'node --test test/*.test.js' }, devDependencies: { 'fixture-dep': '1.0.0' } }, null, 2) + '\n',
+        'gen.js': "const fs=require('fs');const {VERSION}=require('./src/version.js');let style='plain';try{style=require('fixture-dep').style;}catch{}fs.writeFileSync('generated/digest.md',`# digest v${VERSION} (${style})\\n`);\n",
+        'generated/digest.md': '# digest v1.0.0 (fancy)\n',
+      },
+    });
+    commit(repo, { 'src/version.js': "module.exports = { VERSION: '1.0.0' };\n// touched\n" });
+    const r = pregate(repo, ['--stage', 'preflight', '--only', 'regen']);
+    expect(r.status).not.toBe(EXIT.ok);
+    expect(r.out).toMatch(/^preflight {2}regen {5}incomplete .*dependencies missing; run bun install, then rerun the check \(1 entry unverified: digest\) \(REGEN_DEPS_MISSING\)/m);
+    expect(r.err).toContain('(REGEN_DEPS_MISSING)');
+    expect(r.out + r.err).not.toContain('REGEN_STALE');
   });
 
   test('p0-4-scratch-script: zz-probe.sh at the root fails strays (downgraded to warn only when the base config says so); a conventional root file passes', () => {
@@ -185,6 +359,97 @@ describe('gstack-pregate (bin)', () => {
     expect(r.out).toContain('HIGH github.pat [secret]');
     fs.rmSync(path.join(ok.work, 'lib/token.js'));
     expect(pregate(ok, ['--stage', 'preflight', '--only', 'secrets']).status).toBe(EXIT.ok);
+  });
+
+  test('lanes: tracked planning and evidence markdown is docs/no-tests, and an unmapped source file still fails closed', () => {
+    // No .gstack/pregate.json on the base: documentation cannot be declared as [].
+    const docs = fixture({ pregate: null });
+    commit(docs, {
+      '.work/round-3-plan.md': '# plan\n\nImplementation notes, not a test subject.\n',
+      'notes/redproof.md': '# redproof\n\nThe lane failed, then this note recorded the green run.\n',
+      'docs/evidence.md': '# evidence\n',
+    });
+    const ok = pregate(docs, ['--only', 'lanes', '--explain']);
+    expect(ok.status).toBe(EXIT.ok);
+    expect(ok.err).not.toContain('PREGATE_NO_LANE');
+    expect(ok.out).toMatch(/docs\/no-tests: 3 documentation file\(s\)/);
+    expect(ok.out).toContain('.work/round-3-plan.md: docs/no-tests (empty lane)');
+    expect(ok.out).toContain('notes/redproof.md: docs/no-tests (empty lane)');
+    expect(ok.out).toContain('docs/evidence.md: docs/no-tests (empty lane)');
+    expect(ok.out).not.toContain('has no test lane');
+
+    const mixed = fixture({ pregate: null });
+    commit(mixed, {
+      '.work/round-3-plan.md': '# plan\n',
+      'lib/orphan.js': 'exports.lonely = () => 2;\n',
+    });
+    const bad = pregate(mixed, ['--only', 'lanes']);
+    expect(bad.status).toBe(EXIT.fail);
+    expect(bad.err).toContain('(PREGATE_NO_LANE)');
+    expect(bad.out).toContain('lanes: FAIL lanes — lib/orphan.js has no test lane');
+    expect(bad.out).toContain('docs/no-tests (empty lane): .work/round-3-plan.md');
+    expect(bad.out).not.toContain('.work/round-3-plan.md has no test lane');
+
+    const extra = fixture({ pregate: { empty_lanes: ['notes/**/*.txt'], runner: 'node --test {files}' } });
+    commit(extra, { 'notes/sketch.txt': 'a note that is not markdown\n' });
+    const declared = pregate(extra, ['--only', 'lanes']);
+    expect(declared.status).toBe(EXIT.ok);
+    expect(declared.err).not.toContain('PREGATE_NO_LANE');
+    expect(declared.out).toContain('docs/no-tests (empty lane): notes/sketch.txt');
+  });
+
+  test('lanes: unreferenced markdown is docs/no-tests; markdown a test reads selects that test', () => {
+    const unread = fixture({ pregate: null });
+    commit(unread, {
+      'prompts/system.md': '# system\n\nAn unmarked prompt, not a plan or a redproof.\n',
+      'notes/scratch.md': '# scratch\n',
+    });
+    const idle = pregate(unread, ['--only', 'lanes', '--explain']);
+    expect(idle.status).toBe(EXIT.ok);
+    expect(idle.err).not.toContain('PREGATE_NO_LANE');
+    expect(idle.out).toMatch(/docs\/no-tests: 2 documentation file\(s\)/);
+    expect(idle.out).toContain('prompts/system.md: docs/no-tests (empty lane)');
+    expect(idle.out).toContain('notes/scratch.md: docs/no-tests (empty lane)');
+    expect(idle.out).not.toContain('has no test lane');
+
+    const named = fixture({ pregate: null });
+    named.git('checkout', '-q', 'main');
+    write(named.work, 'prompts/system.md', '# system\n');
+    write(named.work, 'test/fixtures/sample.md', '# sample\n');
+    write(named.work, 'test/prompt-doc.test.js', "const test = require('node:test');\nconst fs = require('node:fs');\ntest('reads the prompt', () => { fs.readFileSync('prompts/system.md', 'utf8'); });\n");
+    write(named.work, 'test/fixture-doc.test.js', "const test = require('node:test');\nconst fs = require('node:fs');\nconst path = require('node:path');\ntest('reads the fixture', () => { fs.readFileSync(path.join('test', 'fixtures', 'sample.md'), 'utf8'); });\n");
+    named.git('add', '-A');
+    named.git('commit', '-q', '-m', 'tests read markdown');
+    named.git('push', '-q', 'origin', 'main');
+    named.git('checkout', '-q', 'feature');
+    named.git('reset', '--hard', 'main');
+    commit(named, {
+      'prompts/system.md': '# system\n\nupdated\n',
+      'test/fixtures/sample.md': '# sample\n\nupdated\n',
+    });
+    const r = pregate(named, ['--only', 'lanes', '--explain']);
+    expect(r.status).toBe(EXIT.ok);
+    expect(r.out).toContain('test/prompt-doc.test.js ← prompts/system.md');
+    expect(r.out).toContain('test/fixture-doc.test.js ← test/fixtures/sample.md');
+    expect(r.err).not.toContain('PREGATE_NO_LANE');
+    expect(r.out).not.toContain('docs/no-tests');
+  });
+
+  test('lanes: a test that names a markdown file still runs that test', () => {
+    const repo = fixture({ pregate: null });
+    repo.git('checkout', '-q', 'main');
+    write(repo.work, 'test/readme-doc.test.js', "const test = require('node:test');\nconst fs = require('node:fs');\ntest('reads the readme', () => { fs.readFileSync('docs/README.md', 'utf8'); });\n");
+    repo.git('add', '-A');
+    repo.git('commit', '-q', '-m', 'name the doc');
+    repo.git('push', '-q', 'origin', 'main');
+    repo.git('checkout', '-q', 'feature');
+    repo.git('reset', '--hard', 'main');
+    commit(repo, { 'docs/README.md': '# docs\n\nupdated evidence\n' });
+    const r = pregate(repo, ['--only', 'lanes', '--explain']);
+    expect(r.status).toBe(EXIT.ok);
+    expect(r.out).toContain('test/readme-doc.test.js ← docs/README.md');
+    expect(r.err).not.toContain('PREGATE_NO_LANE');
+    expect(r.out).not.toContain('docs/no-tests');
   });
 
   test('lanes: a touched file with no test lane is FAIL lanes — <file> has no test lane; a declaration or an explicit [] clears it', () => {
@@ -299,4 +564,86 @@ describe('gstack-pregate (bin)', () => {
     expect(runBin(repo, 'gstack-pregate', ['init']).out).toContain('PREGATE_CONFIG_WRITTEN');
     expect(runBin(repo, 'gstack-pregate', ['validate']).status).toBe(EXIT.ok);
   });
+});
+
+describe('nested JS packages run their own runner from their own directory', () => {
+  const APP = {
+    'app/package.json': JSON.stringify({ name: 'app', scripts: { test: 'vitest run' }, devDependencies: { vitest: '^3.2.0' } }) + '\n',
+    'app/pnpm-lock.yaml': "lockfileVersion: '9.0'\n",
+    'app/src/sum.ts': 'export const sum = (a: number, b: number) => a + b;\n',
+    'app/src/sum.test.ts': "import { expect, test } from 'vitest';\nimport { sum } from './sum';\ntest('sum', () => expect(sum(1, 2)).toBe(3));\n",
+  };
+  /**
+   * A `pnpm` (and `yarn`) on PATH that reports its cwd and argv and prints a vitest summary for the files it is given.
+   * The lane puts its Bun's directory first on PATH, and that directory can hold a real pnpm (/usr/local/bin), which
+   * would install from the network; the lane's bash puts the shim first again through BASH_ENV.
+   */
+  const pmShim = (repo: FixtureRepo): { PATH: string; BASH_ENV: string } => {
+    const dir = path.join(repo.root, 'shim');
+    fs.mkdirSync(dir, { recursive: true });
+    for (const tool of ['pnpm', 'yarn']) fs.writeFileSync(path.join(dir, tool), '#!/usr/bin/env bash\necho "ran in $(basename "$PWD"): $*"\necho " Test Files  1 passed (1)"\necho "      Tests  3 passed (3)"\n', { mode: 0o755 });
+    fs.writeFileSync(path.join(dir, 'path.sh'), `PATH='${dir}':"$PATH"\n`);
+    return { PATH: `${dir}:${process.env.PATH ?? ''}`, BASH_ENV: path.join(dir, 'path.sh') };
+  };
+  const ctxFor = (repo: FixtureRepo, env: Record<string, string>) => ({ repoRoot: repo.work, config: DEFAULT_CONFIG, env }) as unknown as PregateContext;
+
+  // Value: protects=a test owned by a nested package that declares vitest runs from that package with its lockfile's package manager
+  //   and package-relative paths, while root-owned tests keep the root runner; fails_when=the root package.json alone decides again
+  //   (the reported `bun test` from the repo root: vi.stubGlobal missing); why_new=only root package.json detection was tested;
+  //   seam=none; no_claim=the runners themselves (plan only)
+  test('a nested vitest package plans its own group with the lockfile\'s package manager; root tests keep the root runner', () => {
+    const repo = fixture({ pregate: null, baseFiles: APP });
+    const ctx = ctxFor(repo, pmShim(repo));
+    expect(planRuns(ctx, ['app/src/sum.test.ts', 'test/util.test.js'])).toEqual({ groups: [
+      { runner: 'node --test {files}', cwd: '', files: ['test/util.test.js'] },
+      { runner: 'pnpm exec vitest run {files}', cwd: 'app', files: ['src/sum.test.ts'] },
+    ], unclaimed: [], missing: [], noPubspec: [] });
+    // The lockfile is found walking up, and a packageManager field outranks it.
+    fs.rmSync(path.join(repo.work, 'app/pnpm-lock.yaml'));
+    write(repo.work, 'yarn.lock', '# yarn lockfile v1\n');
+    expect(planRuns(ctx, ['app/src/sum.test.ts']).groups).toEqual([{ runner: 'yarn vitest run {files}', cwd: 'app', files: ['src/sum.test.ts'] }]);
+    write(repo.work, 'app/package.json', JSON.stringify({ name: 'app', packageManager: 'pnpm@9.15.0', devDependencies: { jest: '^29.0.0' } }) + '\n');
+    expect(planRuns(ctx, ['app/src/sum.test.ts']).groups).toEqual([{ runner: 'pnpm exec jest {files}', cwd: 'app', files: ['src/sum.test.ts'] }]);
+    // Value: protects=a package manager missing from PATH is incomplete naming it, never exit 127 judged as a test failure;
+    //   fails_when=the PATH check is dropped; why_new=new detection path; seam=none; no_claim=a real pnpm install
+    expect(planRuns(ctxFor(repo, { PATH: path.join(repo.root, 'empty-path') }), ['app/src/sum.test.ts'])).toEqual({ groups: [], unclaimed: ['app/src/sum.test.ts'], missing: ['pnpm'], noPubspec: [] });
+    fs.rmSync(path.join(repo.work, 'yarn.lock'));
+    write(repo.work, 'app/package.json', JSON.stringify({ name: 'app', devDependencies: { vitest: '^3.2.0' } }) + '\n');
+    expect(planRuns(ctx, ['app/src/sum.test.ts']).groups).toEqual([{ runner: 'npx vitest run {files}', cwd: 'app', files: ['src/sum.test.ts'] }]);
+  });
+
+  // Value: protects=repos where root detection works today are unchanged: a nested package that declares no test runner stays with the
+  //   root runner from the root, a root vitest stays `npx vitest run` from the root, and a declared runner takes every file;
+  //   fails_when=every nested package.json splits a group or the root command changes; why_new=negative controls for the new
+  //   nested detection; seam=none; no_claim=the runners themselves (plan only)
+  test('negative controls: a nested package without a test runner, a root vitest repo and a declared runner keep today\'s plan', () => {
+    const repo = fixture({ pregate: null, baseFiles: { ...APP, 'app/package.json': JSON.stringify({ name: 'app', scripts: { build: 'tsc' } }) + '\n' } });
+    const ctx = ctxFor(repo, pmShim(repo));
+    write(repo.work, 'bun.lock', '{}\n');
+    expect(planRuns(ctx, ['app/src/sum.test.ts', 'test/util.test.js']).groups).toEqual([{ runner: 'bun test {files}', cwd: '', files: ['app/src/sum.test.ts', 'test/util.test.js'] }]);
+    fs.rmSync(path.join(repo.work, 'bun.lock'));
+    write(repo.work, 'package.json', JSON.stringify({ name: 'fixture', devDependencies: { vitest: '^3.2.0' } }) + '\n');
+    write(repo.work, 'pnpm-lock.yaml', "lockfileVersion: '9.0'\n");
+    expect(planRuns(ctx, ['app/src/sum.test.ts', 'test/util.test.js']).groups).toEqual([{ runner: 'npx vitest run {files}', cwd: '', files: ['app/src/sum.test.ts', 'test/util.test.js'] }]);
+    const declared = { ...ctx, config: { ...DEFAULT_CONFIG, runner: 'bun test {files}' } } as PregateContext;
+    write(repo.work, 'app/package.json', APP['app/package.json']);
+    expect(planRuns(declared, ['app/src/sum.test.ts']).groups).toEqual([{ runner: 'bun test {files}', cwd: '', files: ['app/src/sum.test.ts'] }]);
+  });
+
+  // Value: protects=the reported case end to end: a touched source file in a nested pnpm+vitest package runs `pnpm exec vitest run`
+  //   in that package with the package-relative path and passes on vitest's summary; fails_when=the lane runs from the repo root or
+  //   with the root runner; why_new=no nested package run existed; seam=none; no_claim=a real pnpm or vitest (PATH shim)
+  test('a touched file in a nested pnpm+vitest package runs vitest there', () => {
+    const repo = fixture({ pregate: null, baseFiles: APP });
+    // No workflows, so the Windows lane's unknown matrix cannot turn the selection into a requires-remote obligation.
+    commit(repo, { '.github/workflows/free-tests.yml': null, '.github/workflows/windows.yml': null }, 'no workflows');
+    repo.git('push', '-q', 'origin', 'HEAD:main');
+    repo.git('fetch', '-q', 'origin');
+    commit(repo, { 'app/src/sum.ts': 'export const sum = (a: number, b: number) => b + a;\n' });
+    const r = runBin(repo, 'gstack-pregate', ['--base', 'main', '--allow-repo-commands', '--stage', 'tests', '--only', 'lanes'], pmShim(repo));
+    expect(r.out).toMatch(/^tests {6}lanes {5}pass .*3 tests ran in 1 file\(s\), exit 0/m);
+    expect(r.out).toContain("ran: (cd 'app' && pnpm exec vitest run 'src/sum.test.ts')");
+    expect(fs.readFileSync(/log: (\S+)/.exec(r.out)![1]!, 'utf8')).toContain('ran in app: exec vitest run src/sum.test.ts');
+    expect(r.status).toBe(EXIT.ok);
+  }, 60_000);
 });

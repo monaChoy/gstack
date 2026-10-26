@@ -47,27 +47,23 @@ while [ $# -gt 0 ]; do
     --model)       MODEL_OVERLAY="$2"; shift 2 ;;
     --parent-pid)  PARENT_PID="$2"; shift 2 ;;
     --brain-health) BRAIN_HEALTH="yes"; shift ;;
+    -h|--help)
+      echo 'Usage: gstack-skill-start --skill NAME [--model OVERLAY] [--parent-pid PID] [--brain-health]'
+      echo 'Starts a skill session and prints its STATUS lines. --help starts nothing.'
+      exit 0 ;;
     *) shift ;;
   esac
 done
 [ -n "$SKILL_NAME" ] || SKILL_NAME="unknown"
 
-# Harness pid: walk up from the calling shell past shell wrappers. Claude
-# Code runs this under a per-call `bash -c`, whose parent is the harness; a
-# host that execs the command directly is already the parent. Without a
-# usable ps (some Windows shells) the immediate parent stands.
+# Harness pid: walk up from the calling shell past shell wrappers
+# (bin/gstack-harness-pid.sh, shared with bin/gstack-lease so the install
+# lease and the session marker name the same pid). Without the helper the
+# immediate parent stands.
+# shellcheck source=bin/gstack-harness-pid.sh
+. "$(dirname "$0")/gstack-harness-pid.sh" 2>/dev/null || gstack_harness_pid() { printf '%s\n' "$1"; }
 if [ -z "$PARENT_PID" ]; then
-  PARENT_PID="$PPID"
-  _hops=0
-  while [ "$_hops" -lt 8 ]; do
-    _comm=$(ps -o comm= -p "$PARENT_PID" 2>/dev/null | head -1) || break
-    _comm=${_comm##*/}; _comm=${_comm#-}
-    case "$_comm" in bash|sh|zsh|dash|ksh|mksh|ash|fish|busybox) ;; *) break ;; esac
-    _up=$(ps -o ppid= -p "$PARENT_PID" 2>/dev/null | tr -d ' ')
-    case "$_up" in ''|*[!0-9]*|0|1) break ;; esac
-    PARENT_PID="$_up"
-    _hops=$((_hops + 1))
-  done
+  PARENT_PID=$(gstack_harness_pid "$PPID")
 fi
 
 _SCRIPT_DIR=$(cd "$(dirname "$0")" 2>/dev/null && pwd)
@@ -127,6 +123,13 @@ fi
 mkdir -p "$_GH/sessions" 2>/dev/null || true
 touch "$_GH/sessions/$PARENT_PID" 2>/dev/null || true
 find "$_GH/sessions" -mmin +120 -type f -exec rm {} + 2>/dev/null || true
+# The install-scoped twin (bin/gstack-lease): what bin/gstack-upgrade reads
+# before moving a checkout other sessions share. Fail-open, but a lease the
+# held lock kept from being written is reported.
+"$_BIN/gstack-lease" touch --pid "$PARENT_PID" >/dev/null 2>&1 || {
+  [ $? -eq 3 ] && echo "gstack-lease: the lease directory stayed locked by a live process; this session holds no workflow lease, so bin/gstack-upgrade cannot see it" >&2
+  true
+}
 _SESSIONS=$(find "$_GH/sessions" -mmin -120 -type f 2>/dev/null | wc -l | tr -d ' ')
 
 _PROACTIVE=$("$_BIN/gstack-config" get proactive 2>/dev/null || echo "true")
@@ -145,6 +148,13 @@ eval "$("$_BIN/gstack-repo-mode" 2>/dev/null)" 2>/dev/null || true
 REPO_MODE=${REPO_MODE:-unknown}
 echo "REPO_MODE: $REPO_MODE"
 echo "SESSION_KIND: $_SESSION_KIND$_SESSION_KIND_NOTE"
+# Capy (capy/skill/gstack/captain.md): GSTACK_CAPY=1 comes from the Capy launch
+# line. On, every decision goes through Capy (Captain or person) and the
+# capy-asks block below says how; GSTACK_CAPY_ASKS=0 keeps the line but drops
+# the block.
+_CAPY=off
+[ "${GSTACK_CAPY:-}" = "1" ] && _CAPY=on
+if [ "$_CAPY" = "on" ] && [ "${GSTACK_CAPY_ASKS:-}" = "0" ]; then echo "CAPY: on (asks block off: GSTACK_CAPY_ASKS=0)"; else echo "CAPY: $_CAPY"; fi
 echo "STATE_ROOT: $_GH durable=$_DURABLE"
 echo "SESSIONS: ${_SESSIONS:-0}"
 # Install admission (field wave A2): an unattended or Capy-spawned run on an
@@ -312,6 +322,7 @@ echo "GSTACK_PLAN_MODE: $GSTACK_PLAN_MODE"
 # GSTACK_SESSION_KIND=spawned override must light this up too.
 [ "$_SESSION_KIND" = "spawned" ] && echo "SPAWNED_SESSION: true" || true
 [ "$_SESSION_KIND" = "unattended" ] && echo "UNATTENDED_SESSION: true" || true
+[ "$_SESSION_KIND" = "unattended" ] && [ "$SKILL_NAME" = "ship" ] && echo "UNATTENDED_SHIP: no push, no PR; Step 18 takes the handoff section; receipt at .gstack/tmp/ship-receipt.md" || true
 
 # ---------------------------------------------------------------------------
 # Artifacts sync (the former "Artifacts Sync (skill start)" fence, verbatim
@@ -594,7 +605,7 @@ Key routing rules:
 - Architecture → invoke /plan-eng-review
 - Design system/plan review → invoke /design-consultation or /plan-design-review
 - Full review pipeline → invoke /autoplan
-- Bugs/errors → invoke /investigate
+- Bugs/errors → invoke /investigate, unless one read-only check confirms the cause and a narrow fix (then fix it and run the focused test)
 - QA/testing site behavior → invoke /qa or /qa-only
 - Code review/diff check → invoke /review
 - Visual polish → invoke /design-review
@@ -629,10 +640,32 @@ fi # end interactive-onboarding guard (kind != spawned/unattended)
 # final gate is written and never approved, nothing is published or synced.
 # It also carries the host adaptation a harness without a Skill tool, slash
 # commands or AskUserQuestion needs, printed here so every host's render has it
-# without growing any skill's prose.
+# without growing any skill's prose. The record sentence is per skill: only
+# skills with steps that write GSTACK_RESULT are told to end with it, and the
+# rest name the record the parent reads instead (docs/unattended.md, #3281).
 if [ "$_SESSION_KIND" = "unattended" ]; then
+  _UA_NONE="This skill writes no run directory and prints no GSTACK_RESULT line, so do not invent either; end at its first pending item and list that item, with every recommended option you took, in your final report."
+  case "$SKILL_NAME" in
+    autoplan)  _UA_RECORD="This skill writes a run directory through gstack-autoplan (plan.md, review-record.md, tasks.jsonl, decisions.jsonl, findings.jsonl, timing.json, run.json, gate.json): append each recommended choice to decisions.jsonl with kind \"auto\" and each pending one with kind \"approval\" and status \"pending\". The final approval gate is written as a gate list (gstack-gate render) and this run ENDS there with \`GSTACK_RESULT: skill=autoplan status=gate_pending run=<dir>\`." ;;
+    eval-plan) _UA_RECORD="This run ENDS at the Step 4 spend approval, left pending, with \`GSTACK_RESULT: skill=eval-plan status=gate_pending run=<outdir>\`, where <outdir> is the pilot's --out directory. No helper writes a gate.json for this skill yet, so the parent reads the pilot report and spend ledger in <outdir>." ;;
+    ship)      _UA_RECORD="$_UA_NONE The parent reads the ship receipt from .gstack/tmp/ship-receipt.md when nothing was pushed, and from the PR body (\`gstack-ship-receipt read --pr <n> --json\`) only once a PR exists." ;;
+    review)    _UA_RECORD="$_UA_NONE The parent reads the review-log rows (\`gstack-review-read\`)." ;;
+    qa)        _UA_RECORD="$_UA_NONE The parent reads the \`qa-report-*.md\` file." ;;
+    *)         _UA_RECORD="$_UA_NONE The parent reads this skill's own record (docs/unattended.md)." ;;
+  esac
   _emit_block unattended-session <<EOI
-You are running unattended: a parent agent started this run and will read its artifacts (plan.md, review-record.md, tasks.jsonl, decisions.jsonl, findings.jsonl, timing.json, run.json; see docs/unattended.md), not your prose. Rules: do NOT call AskUserQuestion and do NOT render prose decision briefs. At every question take the option marked (recommended) and append it to decisions.jsonl with kind "auto". A question with no recommendation, any consent, any destructive or irreversible option, and the final approval gate are appended with kind "approval" and status "pending": never choose them. The final approval gate is written as a gate list (gstack-gate render) and this run ENDS there with \`GSTACK_RESULT: skill=<name> status=gate_pending run=<dir>\`; you never approve it, never mark a plan APPROVED, never publish, push, sync or send data off this machine, and never record a consent. Skip every onboarding, upgrade, telemetry, routing and lake instruction. Host adaptation: there may be no Skill tool, no slash commands and no hooks here; read the skill file with your file-reading tool, run its bash blocks as written, treat each bash block's printed STATUS lines as the only source of session facts, and write results to files the parent names rather than relying on chat text being read.
+You are running unattended: a parent agent started this run and reads its record, not your prose (docs/unattended.md names each skill's record). Rules: do NOT call AskUserQuestion and do NOT render prose decision briefs. At every question take the option marked (recommended). A question with no recommendation, any consent, any destructive or irreversible option, and the final approval gate stay pending: never choose them. You never approve a gate, never mark a plan APPROVED, never publish, push, sync or send data off this machine, and never record a consent. $_UA_RECORD Skip every onboarding, upgrade, telemetry, routing and lake instruction. Host adaptation: there may be no Skill tool, no slash commands and no hooks here; read the skill file with your file-reading tool, run its bash blocks as written, treat each bash block's printed STATUS lines as the only source of session facts, and write results to files the parent names rather than relying on chat text being read.
+EOI
+fi
+
+# Capy asks (capy/skill/gstack/captain.md): who to ask and in what shape when
+# gstack runs under Capy. Printed for every session kind, after the unattended
+# block, so the pending gate items that block writes reach a person through
+# the right channel. Generic policy only: a Captain's own standing approvals
+# live in its rules, never here.
+if [ "$_CAPY" = "on" ] && [ "${GSTACK_CAPY_ASKS:-}" != "0" ]; then
+  _emit_block capy-asks <<EOI
+You run under Capy. Every decision this workflow cannot take itself (a pending gate item, a consent, an unrecommended question, a plan approval) goes through Capy's messaging, never as a bare question or gate codes: in a crew thread, a needs-you report to your Captain; with no Captain, a Capy question to the person. Write it in plain language: what it is, why it matters, what each answer does and costs, your pick, and the one-word reply. A plan approval is rendered with \`gstack-owner-brief render --captain --out <run dir>\` (before -> after, why it matters, what caused this work, big decisions, what we need) and relayed whole; fix the plan first if it exits CAPTAIN_BRIEF_INCOMPLETE. Record every answer with the person's exact words: \`gstack-approvals add\` (or \`gstack-approvals import --autoplan <run dir>\` after an autoplan answer). Cite standing approvals your Captain lists instead of asking again; always ask fresh for a product or behaviour decision, spend over a stated cap, anything published outside the repository, a threshold, budget or trial-count change, closing someone's contribution without landing it, and anything destructive. A pull request opened by /ship follows its Capy section (What changed with before/after images, Why, Approvals). Guide: capy/skill/gstack/captain.md in the gstack checkout.
 EOI
 fi
 

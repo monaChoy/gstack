@@ -13,7 +13,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import type { JSONOutputFormat } from '@anthropic-ai/sdk/resources/messages';
 import { setTimeout as delay } from 'node:timers/promises';
 
-import { CLAUDE_FRONTIER_EVAL_MODEL, DEFAULT_JUDGE_MAX_TOKENS, resolveEvalModel } from '../../lib/eval-model';
+import { CLAUDE_JUDGE_EVAL_MODEL, DEFAULT_JUDGE_MAX_TOKENS, resolveEvalModel } from '../../lib/eval-model';
 export { DEFAULT_JUDGE_MAX_TOKENS } from '../../lib/eval-model';
 
 export interface JudgeScore {
@@ -89,11 +89,12 @@ export interface RecommendationScore {
 /**
  * Call an Anthropic model with a prompt, extract JSON response.
  * Jittered exponential backoff over three 429 retries. Model resolves via
- * lib/eval-model's `judge` kind (frontier Claude default); pass a model id
+ * lib/eval-model's `judge` kind (CLAUDE_JUDGE_EVAL_MODEL); pass a model id
  * (e.g. claude-haiku-4-5-20251001) for cheaper bounded judgments like
  * judgeRecommendation.
  */
-// Default judge model: the current frontier Claude eval model. Override per run
+// Default judge model: CLAUDE_JUDGE_EVAL_MODEL, kept apart from the model under
+// test so calibration holds when the model under test moves. Override per run
 // with GSTACK_EVAL_MODEL_JUDGE; Haiku remains the right default for
 // classifier-grade duties (pty hung/working, warmup, distill — see
 // lib/eval-model.ts).
@@ -125,7 +126,7 @@ export async function callJudge<T>(
   const signal = opts?.signal;
   signal?.throwIfAborted();
   // Routed through the documented single resolution point: explicit arg >
-  // GSTACK_EVAL_MODEL_JUDGE > GSTACK_EVAL_MODEL > frontier default. The old
+  // GSTACK_EVAL_MODEL_JUDGE > GSTACK_EVAL_MODEL > judge default. The old
   // inline `GSTACK_EVAL_MODEL_JUDGE || sonnet` silently ignored the global
   // GSTACK_EVAL_MODEL override that every other eval call site honors.
   // opts support bounded judgments; cancellation covers both requests and
@@ -186,6 +187,13 @@ export async function callJudge<T>(
     .filter(block => block.type === 'text')
     .map(block => block.text)
     .join('\n');
+  const parseJudgeText = (json: string): T => {
+    try {
+      return JSON.parse(json) as T;
+    } catch (error) {
+      throw new SyntaxError(`Judge response is not valid JSON (stop_reason=${response.stop_reason}, ${json.length} chars; full text in llm-judge-response-parse-error): ${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
   try {
     if (response.stop_reason === 'max_tokens') {
       throw new Error(`Judge response truncated at max_tokens=${maxTokens} (model=${resolvedModel})`);
@@ -193,11 +201,11 @@ export async function callJudge<T>(
     if (response.stop_reason === 'refusal') throw new JudgeRefusalError(response);
     if (opts?.jsonSchema !== undefined) {
       if (response.stop_reason !== 'end_turn') throw new Error(`Structured judge did not complete: stop_reason=${response.stop_reason}`);
-      return JSON.parse(text) as T;
+      return parseJudgeText(text);
     }
     const jsonMatch = text.match(/\{[\s\S]*\}/);
     if (!jsonMatch) throw new Error(`Judge returned non-JSON: ${text.slice(0, 200)}`);
-    return JSON.parse(jsonMatch[0]) as T;
+    return parseJudgeText(jsonMatch[0]);
   } catch (error) {
     // The canonical full stderr spool retains this public response even when
     // parsing fails before a caller can record a judgment. Never copy content
@@ -746,7 +754,7 @@ export interface ArmJudgeScore {
  * point of a research instrument; a per-run judge swap silently moves the
  * ruler.
  */
-export const ARM_JUDGE_MODEL = CLAUDE_FRONTIER_EVAL_MODEL;
+export const ARM_JUDGE_MODEL = CLAUDE_JUDGE_EVAL_MODEL;
 
 /**
  * Build the over-engineering rubric prompt. Exported (pure) so the free
