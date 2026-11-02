@@ -63,6 +63,8 @@ const POLARITY: Record<string, 'fail-closed' | 'fail-open'> = {
   // fail-open: user-facing operations that must not die over an audit-log
   // hiccup; they warn on stderr and proceed.
   'design-openai': 'fail-open',
+  // #990: the same design commands on Gemini when no OpenAI key is set.
+  'design-gemini': 'fail-open',
   'update-check': 'fail-open',
   'security-dashboard': 'fail-open',
   'community-dashboard': 'fail-open',
@@ -98,6 +100,9 @@ const MODULE_SINKS = [
   // repository permission (`gh api .../collaborators/<user>/permission`); the
   // author login and repo slug leave the machine, sink 'contributor-mode'.
   'lib/contributor-mode.ts',
+  // GSTA-156: gstack-pregate clear --run reads the repository's own Actions runs
+  // through gh and fetches a missing run head from origin by sha; sink 'run-evidence'.
+  'lib/run-evidence.ts',
   // The Memorable bridge hook: gstack-owned code that hands each prompt to a
   // vendor CLI. hosts/ has no curl/fetch for the scanner to see, so the
   // receipt wiring is pinned here explicitly.
@@ -117,7 +122,7 @@ const SHELL_SINKS = [
   'bin/gstack-session-update',
 ];
 
-/** design files that talk to api.openai.com — all must use receiptedFetch. */
+/** design files that talk to an image provider (OpenAI or Gemini) — all must use receiptedFetch. */
 const DESIGN_SINKS = [
   'design/src/generate.ts',
   'design/src/variants.ts',
@@ -148,6 +153,8 @@ const SCANNER_EXEMPT: Record<string, string> = {
     'fetches the user\'s own repo\'s base branch for version-claim freshness — a user-repo dev-workflow op, not gstack-state egress',
   'bin/gstack-version-bump':
     'git fetch appears only in an error-message string',
+  'bin/gstack-worktree-audit':
+    'read-only audit: best-effort fetch of the user\'s own repo\'s base branch so the MERGED column is current (skipped with --no-fetch) — a user-repo dev-workflow op like gstack-next-version\'s, not gstack-state egress',
   'bin/gstack-state-matrix':
     'git fetch appears only in an error-message string (the fix the user runs when origin/<base> has no merge base)',
   'bin/gstack-redact-prepush':
@@ -369,6 +376,7 @@ describe('egress receipt wiring tripwire', () => {
     expect(open.sort()).toEqual([
       'community-dashboard',
       'context-bill --exact',
+      'design-gemini',
       'design-openai',
       'git-class user ops (artifacts-init, brain-restore, session-update)',
       'security-dashboard',
