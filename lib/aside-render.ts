@@ -321,10 +321,10 @@ export function serveDir(root: string, nonce: string = randomBytes(16).toString(
 
 // ─── Async spawn (keeps the loopback server's event loop free) ────────────────
 
-async function runProc(cmd: string, args: string[], timeoutMs: number): Promise<{ code: number | null; stdout: string; stderr: string; error?: string }> {
+async function runProc(cmd: string, args: string[], timeoutMs: number, env?: Record<string, string | undefined>): Promise<{ code: number | null; stdout: string; stderr: string; error?: string }> {
   let child: Bun.Subprocess<'ignore', 'pipe', 'pipe'>;
   try {
-    child = Bun.spawn([cmd, ...args], { stdout: 'pipe', stderr: 'pipe', stdin: 'ignore' });
+    child = Bun.spawn([cmd, ...args], { stdout: 'pipe', stderr: 'pipe', stdin: 'ignore', ...(env ? { env } : {}) });
   } catch (e) {
     return { code: null, stdout: '', stderr: '', error: (e as Error).message };
   }
@@ -519,6 +519,90 @@ function screenshotName(i: number, step: ScreenshotStep): string {
  * Aside path, one CLI call per action, artifacts staged under /tmp and copied
  * to the caller's paths. The tab is closed in a finally; the daemon stays up.
  */
+/** The checkout's bin/gstack-browser-ensure next to a browse/dist/browse binary; it installs gstack's Chromium on first use. */
+function browserEnsureBin(bin: string): string | null {
+  const root = /^(.*)[\\/]browse[\\/]dist[\\/]browse(?:\.exe)?$/.exec(bin)?.[1];
+  const ensure = root ? path.join(root, 'bin', 'gstack-browser-ensure') : null;
+  return ensure && fs.existsSync(ensure) ? ensure : null;
+}
+
+type BrowseRunner = { deadline: number; browseEnv: Record<string, string | undefined>; run: (args: string[]) => Promise<string> };
+
+/** browse CLI calls sharing one deadline. A failed call throws its most useful line, plus Chromium's own "No usable sandbox" line when the launch hit one. */
+function browseRunner(bin: string, log: string[], timeoutMs: number): BrowseRunner {
+  const browseEnv = { ...process.env, BROWSE_SESSION: '' };
+  const b: BrowseRunner = {
+    deadline: Date.now() + timeoutMs,
+    browseEnv,
+    run: async (args) => {
+      const r = await runProc(bin, args, Math.max(1_000, Math.min(120_000, b.deadline - Date.now())), b.browseEnv);
+      log.push(`$ browse ${args.join(' ').slice(0, 300)}\n${r.stdout}${r.stderr}`.trim());
+      if (r.error || r.code !== 0) {
+        const lines = (r.stderr || r.stdout || r.error || '').split('\n').map((l) => l.trim()).filter(Boolean);
+        const first = lines.find((l) => /Executable doesn't exist/.test(l)) ?? lines.find((l) => !/^\[browse\] (Starting server|Server failed to start)/.test(l) && !/^[\u2554\u2551\u255a]/.test(l)) ?? lines[0] ?? '';
+        if (/JS execution blocked/.test(`${r.stderr}${r.stdout}`)) {
+          // After `$B cookie-import` the daemon refuses page JS on every other
+          // origin, 127.0.0.1 included; a local-HTML render cannot proceed in it.
+          throw new Error(`browse ${args[0]} refused: the daemon has imported cookies and blocks page JS on other origins (127.0.0.1 included) — restart it ($B stop) before rendering local HTML, or open Aside`);
+        }
+        const fatal = lines.find((l) => l.includes('No usable sandbox'));
+        throw new Error(`browse ${args[0]} failed: ${first}${fatal && fatal !== first ? `\n${fatal}` : ''}`);
+      }
+      return r.stdout;
+    },
+  };
+  return b;
+}
+
+/**
+ * Open a tab, which starts the daemon and gstack's Chromium on first use.
+ * A cold daemon can answer "Unable to connect" once while it comes up, so that
+ * is retried once after a short pause; a missing Chromium is installed once
+ * with gstack-browser-ensure, and the install time does not count against the
+ * deadline.
+ */
+async function openBrowseTab(bin: string, b: BrowseRunner, log: string[]): Promise<number> {
+  const openTab = async () => (await b.run(['newtab', '--json'])).match(/\{[^\n]*"tabId"[^\n]*\}/)?.[0];
+  let opened: string | undefined;
+  try {
+    opened = await openTab();
+  } catch (e) {
+    const message = (e as Error).message;
+    const ensure = /Executable doesn't exist/.test(message) ? browserEnsureBin(bin) : null;
+    if (ensure) {
+      log.push('newtab: Chromium is not installed — running gstack-browser-ensure once');
+      const installStart = Date.now();
+      const installed = await runProc('bash', [ensure, '--quiet'], 600_000, b.browseEnv);
+      b.deadline += Date.now() - installStart;
+      const last = installed.stdout.trim().split('\n').at(-1) ?? '';
+      log.push(`${ensure} --quiet\n${installed.stdout}${installed.stderr}`.trim());
+      if (installed.error || installed.code !== 0) throw new Error(`${message} (gstack-browser-ensure: ${last || installed.error || `exit ${installed.code}`})`);
+      opened = await openTab();
+    } else {
+      if (!/Unable to connect/.test(message)) throw e;
+      log.push('newtab: daemon not up yet — retrying once');
+      await Bun.sleep(1_500);
+      opened = await openTab();
+    }
+  }
+  const tab = opened ? JSON.parse(opened).tabId : undefined;
+  if (typeof tab !== 'number') throw new Error('browse newtab --json returned no tabId');
+  return tab;
+}
+
+/** The cheapest real launch of gstack's browser, for design-build preflight: open one tab, then close it. Null when it opened, else why it did not. */
+export async function launchBrowse(bin: string): Promise<string | null> {
+  const log: string[] = [];
+  const b = browseRunner(bin, log, DEFAULT_TIMEOUT_MS);
+  try {
+    const tab = await openBrowseTab(bin, b, log);
+    await runProc(bin, ['closetab', String(tab)], 15_000, b.browseEnv);
+    return null;
+  } catch (e) {
+    return (e as Error).message;
+  }
+}
+
 export async function renderWithBrowse(spec: RenderSpec, bin: string | null = resolveBrowseBin()): Promise<RenderResult> {
   const outputs: string[] = [];
   const evals: Record<number, string> = {};
@@ -528,21 +612,8 @@ export async function renderWithBrowse(spec: RenderSpec, bin: string | null = re
   const target = pageTarget(spec);
   if (target.kind === 'error') return fail(target.error);
 
-  const deadline = Date.now() + (spec.timeoutMs ?? DEFAULT_TIMEOUT_MS);
-  const run = async (args: string[]): Promise<string> => {
-    const r = await runProc(bin, args, Math.max(1_000, Math.min(120_000, deadline - Date.now())));
-    log.push(`$ browse ${args.join(' ').slice(0, 300)}\n${r.stdout}${r.stderr}`.trim());
-    if (r.error || r.code !== 0) {
-      const first = (r.stderr || r.stdout || r.error || '').trim().split('\n')[0];
-      if (/JS execution blocked/.test(`${r.stderr}${r.stdout}`)) {
-        // After `$B cookie-import` the daemon refuses page JS on every other
-        // origin, 127.0.0.1 included; a local-HTML render cannot proceed in it.
-        throw new Error(`browse ${args[0]} refused: the daemon has imported cookies and blocks page JS on other origins (127.0.0.1 included) — restart it ($B stop) before rendering local HTML, or open Aside`);
-      }
-      throw new Error(`browse ${args[0]} failed: ${first}`);
-    }
-    return r.stdout;
-  };
+  const b = browseRunner(bin, log, spec.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+  const run = b.run;
   const copyOut = (src: string, out: string, i: number) => {
     if (!fs.existsSync(src)) throw new Error(`step ${i} produced no artifact (${src})`);
     fs.mkdirSync(path.dirname(path.resolve(out)), { recursive: true });
@@ -556,21 +627,7 @@ export async function renderWithBrowse(spec: RenderSpec, bin: string | null = re
   try {
     work = fs.mkdtempSync(path.join(SAFE_TMP_DIR, 'gstack-render-browse-'));
     srv = openTarget(target);
-    // The first CLI call auto-starts the daemon; on a cold start it can answer
-    // "Unable to connect" once while the server is still coming up. One retry
-    // after a short pause turns that into the wait it really is.
-    const openTab = async () => (await run(['newtab', '--json'])).match(/\{[^\n]*"tabId"[^\n]*\}/)?.[0];
-    let opened: string | undefined;
-    try {
-      opened = await openTab();
-    } catch (e) {
-      if (!/Unable to connect/.test((e as Error).message)) throw e;
-      log.push('newtab: daemon not up yet — retrying once');
-      await Bun.sleep(1_500);
-      opened = await openTab();
-    }
-    tab = opened ? JSON.parse(opened).tabId : undefined;
-    if (typeof tab !== 'number') throw new Error('browse newtab --json returned no tabId');
+    tab = await openBrowseTab(bin, b, log);
     const T = ['--tab-id', String(tab)];
     const js = async (expr: string, extra: string[] = []) => (await run(['js', expr, ...extra, ...T])).replace(/\n$/, '');
     // Poll until truthy. A throw inside the page (e.g. `window.later.ok` before
@@ -647,7 +704,7 @@ export async function renderWithBrowse(spec: RenderSpec, bin: string | null = re
   } catch (e) {
     return fail((e as Error).message);
   } finally {
-    if (tab !== undefined) await runProc(bin, ['closetab', String(tab)], 15_000);
+    if (tab !== undefined) await runProc(bin, ['closetab', String(tab)], 15_000, b.browseEnv);
     srv?.stop();
     if (work) fs.rmSync(work, { recursive: true, force: true });
   }
@@ -656,7 +713,12 @@ export async function renderWithBrowse(spec: RenderSpec, bin: string | null = re
 // ─── Engine choice ───────────────────────────────────────────────────────────
 
 export const NO_BROWSER = 'no browser available';
-export const NO_BROWSER_HELP = "open the Aside app (macOS 15+, aside.com), or run ./setup in the gstack repo to build gstack's own headless browser (or point GSTACK_BROWSE_BIN at a browse binary)";
+/** Recovery advice for a missing browser. Aside ships only for macOS, so other platforms get only the bundled-browser remedies. */
+export function noBrowserHelp(platform: NodeJS.Platform = process.platform): string {
+  const aside = platform === 'darwin' ? 'open the Aside app (macOS 15+, aside.com), or ' : '';
+  return `${aside}run ./setup in the gstack repo to build gstack's own headless browser (or point GSTACK_BROWSE_BIN at a browse binary)`;
+}
+export const NO_BROWSER_HELP = noBrowserHelp();
 
 export type EngineChoice =
   | { engine: 'aside'; version: string }

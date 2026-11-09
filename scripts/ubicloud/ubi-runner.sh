@@ -35,7 +35,21 @@
 # confirmed gone or provably never existed, waiting out a create that may still
 # be in flight. An interrupted `up` or `run` (EXIT, INT, TERM, QUIT, and HUP
 # until a remote phase is live) runs that `down`; further signals are ignored
-# until it finishes. A create refused
+# until it finishes. A create is sent only after a show of the name answers
+# 404: a name another VM answers to, or a check with no answer, is refused
+# before any request. Teardown is armed only once this call's create request is
+# sent, and disarmed when Ubicloud refuses it (HTTP 4xx, a 409 name collision
+# included), so it never destroys a VM this call did not create. A 5xx or no
+# answer is not a refusal: `up` looks the VM up by name for UBI_CREATE_GRACE
+# seconds, and when that cannot settle it either, it keeps the record and the recovery
+# bundle and exits UBI_CREATE_UNKNOWN. Another caller can take an explicit -n
+# name between the check and the create, so a VM found that way is adopted
+# with teardown off, and teardown is armed only once this call's ssh key opens
+# it (within UBI_SSH_WAIT seconds, default 300); if the key never does, `up`
+# exits UBI_CREATE_UNKNOWN and leaves the VM to its TTL. `down` counts a VM as gone only
+# on a readable answer: a failed or unreadable VM list or show is unknown, so
+# down exits non-zero and keeps the recovery bundle. The API key reaches curl
+# as a header file on a pipe, never in its argv. A create refused
 # for vCPU quota prints the project's usage per owner.
 #
 # The owner-age sweep is off by default (the TTL reap below always runs). With UBI_GC_HOURS set to a positive
@@ -44,12 +58,13 @@
 #
 # TTL and reaper: a name this script generates ends in -t<hours> (UBI_TTL_HOURS,
 # 1-999, default 3), the creator's own declaration of how long the VM may live.
-# `reap` destroys every VM in the project whose TTL expired more than ten
-# minutes ago, whichever owner made it, and this owner's own ubirun-<owner>-*
-# names with no TTL once they are UBI_LEGACY_HOURS old (default 4; another
-# owner's or an untagged TTL-less VM is never reaped); every `up` runs it first (UBI_REAP=0 skips it), so a runner
-# killed by a sleeping machine leaves nothing behind for longer than its TTL.
-# Names outside the ubirun- prefix are never reaped.
+# `reap` destroys only this owner's VMs: its ubirun-<owner>-* names whose TTL
+# expired more than ten minutes ago, and those with no TTL once they are
+# UBI_LEGACY_HOURS old (default 4). Another owner's VM, an untagged one and
+# names outside the ubirun- prefix are never reaped, expired or not; reap only
+# counts other owners' expired VMs in its log (cloud deletes stay owner-scoped,
+# GST-573). Every `up` runs it first (UBI_REAP=0 skips it), so a lane killed by
+# a sleeping machine has its leftovers destroyed by its own next `up`.
 #
 # Leftover line: `run` and `verify` end with
 #   UBICLOUD: left=<0|1|unknown> owner=<owner> vm=<name> others=<n>
@@ -101,7 +116,34 @@
 # reads .gstack/ubicloud.json (setup, command, size, location, env, pass, pull)
 # and runs it through `run`, so lanes share one committed definition instead of
 # per-lane wrappers.
+#
+# Surviving a dead controller (GST-1220). With UBI_RECOVERY_DIR set (on Capy,
+# GSTACK_CAPY_RECOVERY_DIR names a drive folder), `up` writes an encrypted
+# recovery bundle of each VM's local state (ssh key, env, tags) to
+# <dir>/<owner>/<vm>.bundle, and `recover [--owner OLD]` on another machine
+# rebuilds that state so pull, ssh and down work there. The bundle is AES-256
+# (openssl enc, pbkdf2) under a key derived from UBI_RECOVERY_KEY or else
+# UBICLOUD_API_KEY, with an HMAC-SHA256 checked before anything is decrypted;
+# the secret travels only on a pipe, never in argv, a child's environment or a
+# file. A counted run (--counted or UBI_COUNTED=1) refuses before any create
+# without a bundle (UBI_RECOVERY_REQUIRED, UBI_RECOVERY_UNAVAILABLE). Run
+# recover only once the creating machine is dead: a paused one is not detected.
+# `up --sink https-put:<presigned URL> --sink-path PATH` starts a pusher on the
+# VM that uploads heartbeat.json and the PATH entries as results.tgz every
+# UBI_SINK_INTERVAL seconds, so results land even when every controller dies;
+# the URL reaches the VM only in a 600 curl config file. The sink is off unless
+# --sink or UBI_SINK names one, and `down` makes one last push first
+# (SINK_FLUSH_FAILED turns a passing run into exit 1).
 set -euo pipefail
+# The caller's exported names and values, captured before the runner sets any
+# variable of its own: --pass forwards from here, never from a live variable.
+INHERITED_NAMES=() INHERITED_VALUES=()
+for _ubi_n in $(compgen -e); do
+  [ -n "${!_ubi_n+x}" ] || continue
+  INHERITED_NAMES+=("$_ubi_n") INHERITED_VALUES+=("${!_ubi_n}")
+done
+unset _ubi_n
+INHERITED_ENV=" ${INHERITED_NAMES[*]-} "
 # Keep heredoc bodies on temp files, not the pipe window (test/heredoc-pipe-deadlock.test.ts).
 BASH_COMPAT=50
 
@@ -112,6 +154,7 @@ DEFAULT_LOCATION="${UBI_LOCATION:-eu-central-h1}"
 GC_HOURS="${UBI_GC_HOURS:-0}"
 API_TIMEOUT="${UBI_API_TIMEOUT:-120}"
 CREATE_GRACE="${UBI_CREATE_GRACE:-180}"
+SSH_WAIT="${UBI_SSH_WAIT:-300}"
 DOWN_TIMEOUT="${UBI_DOWN_TIMEOUT:-900}"
 POLL="${UBI_POLL_SECONDS:-5}"
 ALLOWED_STORAGE="${UBI_ALLOWED_STORAGE:-320 640}"
@@ -141,6 +184,15 @@ for bin in curl python3 ssh ssh-keygen tar; do
   command -v "$bin" >/dev/null || die "$bin is required"
 done
 UBICLOUD_API_KEY="${UBICLOUD_API_KEY:-${UBICLOUD_API_TOKEN:-}}"
+RECOVERY_DIR="${UBI_RECOVERY_DIR:-${GSTACK_CAPY_RECOVERY_DIR:-}}"
+RECOVERY_SECRET="${UBI_RECOVERY_KEY:-$UBICLOUD_API_KEY}"
+unset UBI_RECOVERY_KEY
+COUNTED="${UBI_COUNTED:-0}"
+SINK_INTERVAL="${UBI_SINK_INTERVAL:-300}"
+SINK_MAX_MB="${UBI_SINK_MAX_MB:-512}"
+SINK_FLUSH_FAILED=""
+[[ "$SINK_INTERVAL" =~ ^[1-9][0-9]*$ ]] || die "UBI_SINK_INTERVAL must be a whole number of seconds, at least 1"
+[[ "$SINK_MAX_MB" =~ ^[1-9][0-9]*$ ]] || die "UBI_SINK_MAX_MB must be a whole number of megabytes, at least 1"
 [[ "$GC_HOURS" =~ ^[0-9]+$ ]] || die "UBI_GC_HOURS must be a whole number of hours (unset or 0 disables the sweep)"
 for v in IDLE_TIMEOUT RUN_TIMEOUT HEARTBEAT QUOTA_WAIT CHECKPOINT_MAX_AGE REATTACH_MARGIN; do
   [[ "${!v}" =~ ^[0-9]+$ ]] || die "UBI_$v must be a whole number of seconds (0 disables it)"
@@ -188,7 +240,7 @@ api() {
   shift
   code=$(python3 -c 'import json,sys; print(json.dumps({"argv": sys.argv[1:]}))' "$@" \
     | curl -sS -o "$out" -w '%{http_code}' --max-time "$API_TIMEOUT" -X POST \
-        -H "Authorization: Bearer $UBICLOUD_API_KEY" \
+        -H @<(printf 'Authorization: Bearer %s\n' "$UBICLOUD_API_KEY") \
         -H 'Accept: text/plain' -H 'Content-Type: application/json' \
         -H 'X-Ubi-Version: 1.0.0' --data @- "$API/cli") || true
   echo "${code:-000}"
@@ -223,7 +275,7 @@ load() {
 }
 
 ssh_opts() {
-  echo -i "$KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+  echo -i "$KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
     -o LogLevel=ERROR -o ServerAliveInterval=30 -o ServerAliveCountMax=6 -o ConnectTimeout=10 \
     -o ControlMaster=auto -o "ControlPath=$(dirname "$KEY")/ctl" -o ControlPersist=300
 }
@@ -515,6 +567,8 @@ lease_busy() {
 
 # vm_alive NAME: the recorded VM still answers show. One confirmed gone is
 # cleaned up (state dir and scratch record), so its record is never tried again.
+# Returns 2 when the API gives no answer either way: the caller must not start a
+# second VM beside one that may still be running.
 vm_alive() {
   local n=$1 out code
   ( load "$n"; [ "$CREATED" = yes ] && [ -n "$IP" ] ) 2>/dev/null || return 1
@@ -524,7 +578,7 @@ vm_alive() {
   case $code in
     200) return 0 ;;
     404) log "run record for $n: the VM is gone; starting a new one"; cmd_down "$n" >/dev/null 2>&1 || true; return 1 ;;
-    *) return 1 ;;
+    *) log "run record for $n: could not check the VM (HTTP $code)"; return 2 ;;
   esac
 }
 
@@ -566,7 +620,8 @@ find_record() {
     [ -f "$f" ] || continue
     grep -qx "RUN_KEY=$RUN_KEY" "$f" || continue
     n=$(basename "$(dirname "$f")")
-    if vm_alive "$n"; then echo "$n"; return 0; fi
+    vm_alive "$n" && { echo "$n"; return 0; }
+    [ $? -ne 2 ] || return 2
   done
 }
 
@@ -738,8 +793,13 @@ run_tiers() {
 # did not name; expires is the epoch the name's -t<hours> TTL ends at, or "-";
 # created is the name's epoch, or "-".
 vm_rows() {
-  local loc name owner created expires
-  cli vm list -N -f location,name | while read -r loc name; do
+  local loc name owner created expires list
+  list=$(cli vm list -N -f location,name) || return 1
+  if grep -Evq '^[[:blank:]]*([a-z0-9-]+[[:blank:]]+[a-z0-9-]+)?[[:blank:]]*$' <<<"$list"; then
+    log "the VM list answer is unreadable (a line is not 'location name')"
+    return 1
+  fi
+  while read -r loc name; do
     [ -n "$name" ] || continue
     owner=. created="" expires=-
     if [[ "$name" =~ ^${PREFIX}-([a-z][a-z0-9]{0,11})-([0-9]{10})- ]]; then
@@ -751,26 +811,29 @@ vm_rows() {
       expires=$(( 10#$created + 10#${BASH_REMATCH[1]} * 3600 ))
     fi
     echo "$loc $name $owner $expires ${created:--}"
-  done
+  done <<<"$list"
 }
 
-# reap: destroy every VM whose name carries a TTL that ended more than
-# REAP_GRACE seconds ago, whichever owner created it (the TTL is that owner's
-# own declaration), and the caller's own TTL-less ubirun-<UBI_OWNER>-* names at
-# least LEGACY_HOURS old. Another owner's TTL-less VM, an untagged one, and names
-# outside the prefix are never touched: only a TTL lets reap judge another lane's VM.
+# reap: destroy the caller's own VMs whose TTL ended more than REAP_GRACE
+# seconds ago, and its TTL-less ubirun-<UBI_OWNER>-* names at least LEGACY_HOURS
+# old. Every other VM is never touched, whatever its TTL says: a delete stays
+# with the owner that created the VM. Other owners' expired VMs are only counted.
 cmd_reap() {
-  local now rows loc name owner expires created n=0 failed=0
+  local now rows loc name owner expires created n=0 failed=0 others=0
   [[ "$LEGACY_HOURS" =~ ^[1-9][0-9]{0,3}$ ]] || die "UBI_LEGACY_HOURS must be a whole number of hours from 1 to 9999 with no leading zero (how old a TTL-less ubirun-* VM must be before reap destroys it)"
   now=$(date +%s)
   rows=$(vm_rows) || { log "reap: could not list the project's VMs; nothing destroyed"; return 1; }
   while read -r loc name owner expires created; do
     [ -n "$name" ] || continue
+    if [ "$owner" != "$OWNER" ]; then
+      [ "$expires" = - ] || [ "$now" -lt $(( expires + REAP_GRACE )) ] || others=$(( others + 1 ))
+      continue
+    fi
     if [ "$expires" != - ]; then
       [ "$now" -ge $(( expires + REAP_GRACE )) ] || continue
       log "reaping expired $loc/$name (owner $owner; its TTL ended $(( (now - expires) / 60 )) min ago)"
     else
-      [ -n "${UBI_OWNER:-}" ] && [ "$owner" = "$OWNER" ] && [ "$created" != - ] || continue
+      [ -n "${UBI_OWNER:-}" ] && [ "$created" != - ] || continue
       [ $(( now - 10#$created )) -ge $(( LEGACY_HOURS * 3600 )) ] || continue
       log "reaping TTL-less $loc/$name (owner $owner; $(( (now - 10#$created) / 3600 ))h old, legacy sweep at ${LEGACY_HOURS}h)"
     fi
@@ -778,22 +841,25 @@ cmd_reap() {
     cmd_down "$name" -l "$loc" || { failed=$(( failed + 1 )); log "failed to reap $loc/$name"; }
   done <<<"$rows"
   [ "$n" -gt 0 ] || log "reap: no expired VMs"
+  [ "$others" -eq 0 ] || log "reap: left $others expired VMs of other owners; only their owners reap them"
   [ "$failed" -eq 0 ] || { log "reap: $failed of $n expired VMs could not be destroyed"; return 1; }
 }
 
 cmd_gc() {
-  local hours=${1:-$GC_HOURS} now loc name owner
+  local hours=${1:-$GC_HOURS} now rows loc name owner failed=0
   [[ "$hours" =~ ^[0-9]+$ ]] || die "gc: HOURS must be a whole number (or set UBI_GC_HOURS)"
   if [ "$hours" -eq 0 ]; then log "gc: no sweep (give HOURS > 0 or set UBI_GC_HOURS); nothing listed, nothing destroyed"; return 0; fi
   now=$(date +%s)
-  vm_rows | while read -r loc name owner _; do
+  rows=$(vm_rows) || { log "gc: could not list the project's VMs; nothing destroyed"; return 1; }
+  while read -r loc name owner _; do
     [ "$owner" = "$OWNER" ] || continue
     [[ "$name" =~ -([0-9]{10})- ]] || continue
     if [ $(( (now - BASH_REMATCH[1]) / 3600 )) -ge "$hours" ]; then
       log "destroying stale $loc/$name (owner $OWNER, older than ${hours}h)"
-      cmd_down "$name" -l "$loc" || log "failed to destroy $loc/$name"
+      cmd_down "$name" -l "$loc" || { failed=$(( failed + 1 )); log "failed to destroy $loc/$name"; }
     fi
-  done
+  done <<<"$rows"
+  [ "$failed" -eq 0 ] || { log "gc: $failed stale VMs could not be destroyed"; return 1; }
 }
 
 cmd_list() {
@@ -849,10 +915,10 @@ write_state() {
     "$1" "$2" "$3" "$4" "$5" "$6" "$$" >"$(state_dir "$1")/env"
 }
 
-# record_vm NAME LOCATION: append to the scratch VM-id file (record-before-create).
+# record_vm NAME LOCATION [OWNER]: append to the scratch VM-id file (record-before-create).
 record_vm() {
   mkdir -p "$(dirname "$VM_RECORD")" 2>/dev/null || return 0
-  printf '%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$OWNER" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$$" >>"$VM_RECORD"
+  printf '%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "${3:-$OWNER}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$$" >>"$VM_RECORD"
 }
 
 # forget_vm NAME: drop the VM from the scratch file once it is confirmed gone.
@@ -868,6 +934,285 @@ cmd_records() {
   [ -s "$VM_RECORD" ] || { echo "(no VMs recorded)"; return 0; }
   printf '%-40s %-14s %-12s %-20s %s\n' NAME LOCATION OWNER CREATED_AT PID
   awk -F'\t' '{ printf "%-40s %-14s %-12s %-20s %s\n", $1, $2, $3, $4, $5 }' "$VM_RECORD"
+}
+
+# vm_gone_final SEEN CREATED CREATE_AT CREATE_PID: a "not found" for the VM is
+# final: it was seen, its create was answered, or the create was sent more than
+# UBI_CREATE_GRACE seconds ago by a process that is gone (or is this one).
+vm_gone_final() {
+  [ "$1" = 1 ] || [ "$2" != unknown ] || { [ $(( $(date +%s) - $3 )) -ge "$CREATE_GRACE" ] \
+    && { [ "$4" = "$$" ] || ! kill -0 "$4" 2>/dev/null; }; }
+}
+
+# Recovery bundles. RB_PY reads the secret on stdin and stretches it with
+# PBKDF2-SHA256 (200000 rounds, a random salt per bundle) into an encryption key
+# and a MAC key; the encryption key reaches openssl on a pipe fd (-pass fd:N).
+# A bundle is UBIRB1, the salt, the ciphertext of a JSON map of the state files
+# with the VM name and owner, and an HMAC over all of it, checked with
+# compare_digest before anything is decrypted. open NAME OWNER exits 3 on any
+# failure, a sealed name or owner other than NAME and OWNER included.
+RB_PY='
+import base64, hashlib, hmac, json, os, subprocess, sys
+MAGIC = b"UBIRB1\n"
+FILES = ("key", "key.pub", "env", "tags", "sink")
+secret = sys.stdin.buffer.read()
+if not secret:
+    sys.exit(2)
+def keys(salt):
+    k = hashlib.pbkdf2_hmac("sha256", secret, b"ubi-runner recovery bundle v1" + salt, 200000, 64)
+    return k[:32].hex().encode(), k[32:]
+def ossl(mode, data, enc_key):
+    r, w = os.pipe()
+    os.write(w, enc_key + b"\n")
+    os.close(w)
+    try:
+        p = subprocess.run(["openssl", "enc", mode, "-aes-256-cbc", "-pbkdf2", "-iter", "1000", "-salt", "-pass", "fd:%d" % r],
+                           input=data, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, pass_fds=(r,))
+    finally:
+        os.close(r)
+    return p.returncode, p.stdout
+if sys.argv[1] == "seal":
+    src, out, name, owner = sys.argv[2:6]
+    salt = os.urandom(16)
+    enc_key, mac_key = keys(salt)
+    files = {}
+    for n in FILES:
+        if os.path.isfile(os.path.join(src, n)):
+            with open(os.path.join(src, n), "rb") as f:
+                files[n] = base64.b64encode(f.read()).decode()
+    rc, ct = ossl("-e", json.dumps({"v": 1, "name": name, "owner": owner, "files": files}).encode(), enc_key)
+    if rc != 0 or not ct:
+        sys.exit(1)
+    body = MAGIC + salt + ct
+    os.makedirs(os.path.dirname(out), mode=0o700, exist_ok=True)
+    tmp = "%s.tmp.%d" % (out, os.getpid())
+    with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as f:
+        f.write(body + hmac.new(mac_key, body, hashlib.sha256).digest())
+    os.rename(tmp, out)
+else:
+    bundle, dest, name, owner = sys.argv[2:6]
+    with open(bundle, "rb") as f:
+        data = f.read()
+    body, mac = data[:-32], data[-32:]
+    if len(data) < len(MAGIC) + 16 + 33 or not body.startswith(MAGIC):
+        sys.exit(3)
+    enc_key, mac_key = keys(body[len(MAGIC):len(MAGIC) + 16])
+    if not hmac.compare_digest(mac, hmac.new(mac_key, body, hashlib.sha256).digest()):
+        sys.exit(3)
+    rc, plain = ossl("-d", body[len(MAGIC) + 16:], enc_key)
+    try:
+        sealed = json.loads(plain) if rc == 0 else {}
+    except ValueError:
+        sealed = {}
+    files = sealed.get("files") if isinstance(sealed, dict) else None
+    if sealed.get("name") != name or sealed.get("owner") != owner or not isinstance(files, dict) \
+            or "env" not in files or "key" not in files or any(n not in FILES for n in files):
+        sys.exit(3)
+    for n, b in files.items():
+        with os.fdopen(os.open(os.path.join(dest, n), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as f:
+            f.write(base64.b64decode(b))
+'
+
+# bundle_save NAME: (re)write NAME's recovery bundle when UBI_RECOVERY_DIR is
+# set. A counted run stops on a failed write; any other run warns and goes on.
+bundle_save() {
+  [ -n "$RECOVERY_DIR" ] || return 0
+  printf %s "$RECOVERY_SECRET" | python3 -c "$RB_PY" seal "$(state_dir "$1")" "$RECOVERY_DIR/$OWNER/$1.bundle" "$1" "$OWNER" && return 0
+  [ "$COUNTED" != 1 ] || die "UBI_RECOVERY_UNAVAILABLE: could not write the recovery bundle for $1 under $RECOVERY_DIR (needs openssl and a writable directory); a counted run needs it"
+  log "WARNING: could not write the recovery bundle for $1 under $RECOVERY_DIR (UBI_RECOVERY_UNAVAILABLE); continuing without one"
+}
+
+# recovery_preflight: a counted run needs a bundle another controller can open.
+recovery_preflight() {
+  [ -n "$RECOVERY_DIR" ] || die "UBI_RECOVERY_REQUIRED: a counted run (--counted or UBI_COUNTED=1) needs a recovery bundle; set UBI_RECOVERY_DIR to a directory another controller can read (on Capy, a drive folder), then rerun"
+  command -v openssl >/dev/null && [ -n "$RECOVERY_SECRET" ] \
+    || die "UBI_RECOVERY_UNAVAILABLE: a counted run needs openssl and a secret (UBI_RECOVERY_KEY or UBICLOUD_API_KEY) to write its recovery bundle"
+}
+
+# recover_failed NAME CODE FIX: one RECOVER_FAILED line; the bundle is kept.
+recover_failed() { echo "RECOVER_FAILED: vm=$1 code=$2 fix=$3"; RECOVER_FAILS=$(( RECOVER_FAILS + 1 )); }
+
+# recover [--owner OLD] [--dir DIR]: rebuild local state for every VM with a
+# bundle under DIR/OLD (default UBI_RECOVERY_DIR and this owner). A live VM
+# prints RECOVERED, a VM confirmed gone drops its bundle (RECOVER_GONE), and
+# anything else prints RECOVER_FAILED and keeps the bundle. State already on
+# this machine is never overwritten.
+RECOVER_FAILS=0
+cmd_recover() {
+  local from=$OWNER dir=$RECOVERY_DIR b name dest tmp code out ip tags
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --owner) from=$2; shift 2 ;;
+      --dir) dir=$2; shift 2 ;;
+      *) die "recover: unknown option $1" ;;
+    esac
+  done
+  [[ "$from" =~ ^[a-z][a-z0-9]{0,11}$ ]] || die "recover: --owner must be an owner tag as the owner command prints it"
+  [ -n "$dir" ] || die "UBI_RECOVERY_REQUIRED: recover reads bundles from UBI_RECOVERY_DIR (or --dir DIR), and neither is set"
+  command -v openssl >/dev/null || die "UBI_RECOVERY_UNAVAILABLE: openssl is required to open recovery bundles"
+  mkdir -p "$STATE_ROOT"
+  out=$(mktemp)
+  for b in "$dir/$from"/*.bundle; do
+    [ -f "$b" ] || { log "recover: no bundles under $dir/$from"; continue; }
+    name=$(basename "$b" .bundle)
+    valid_name "$name" || continue
+    dest=$(state_dir "$name")
+    if [ -e "$dest" ]; then
+      recover_failed "$name" RECOVER_EXISTS "this machine already has state for $name; use it, or run down $name"
+      continue
+    fi
+    tmp=$(mktemp -d "$STATE_ROOT/.recover.XXXXXX")
+    local NAME="" LOCATION="" SIZE="" IP="" CREATED="" CREATE_AT=0 CREATE_PID="" line
+    if printf %s "$RECOVERY_SECRET" | python3 -c "$RB_PY" open "$b" "$tmp" "$name" "$from"; then
+      while IFS= read -r line; do
+        [[ "$line" =~ ^(NAME|LOCATION|SIZE|IP|CREATED|CREATE_AT|CREATE_PID)=([A-Za-z0-9._:/-]*)$ ]] || continue
+        printf -v "${BASH_REMATCH[1]}" %s "${BASH_REMATCH[2]}"
+      done <"$tmp/env"
+    fi
+    if [ "$NAME" != "$name" ] || ! [[ "$CREATE_AT" =~ ^[0-9]+$ && "$LOCATION" =~ ^[a-z0-9-]+$ ]]; then
+      rm -rf "$tmp"
+      recover_failed "$name" RECOVER_DECRYPT_FAILED "the bundle does not authenticate under this secret, or it was sealed for another VM or owner; set UBI_RECOVERY_KEY (or UBICLOUD_API_KEY) to the creating controller's"
+      continue
+    fi
+    code=$(api "$out" vm "$LOCATION/$name" show)
+    case $code in
+      200)
+        ip=$(sed -n 's/^ip4: //p' "$out")
+        printf 'NAME=%q\nLOCATION=%q\nSIZE=%q\nIP=%q\nCREATED=yes\nCREATE_AT=%q\nCREATE_PID=\nADOPTED_BY=%q\n' \
+          "$name" "$LOCATION" "$SIZE" "${ip:-$IP}" "$CREATE_AT" "$OWNER" >"$tmp/env"
+        if [ -e "$dest" ]; then
+          rm -rf "$tmp"
+          recover_failed "$name" RECOVER_EXISTS "state for $name appeared on this machine while recovering; use it"
+          continue
+        fi
+        mv "$tmp" "$dest"
+        record_vm "$name" "$LOCATION" "$from"
+        tags=$(grep -E '^[A-Za-z0-9_.-]+=[A-Za-z0-9_.:/@+-]*$' "$dest/tags" 2>/dev/null | paste -s -d, - || true)
+        echo "RECOVERED: vm=$name ip=${ip:-$IP} owner=$from tags=$tags" ;;
+      404)
+        rm -rf "$tmp"
+        if vm_gone_final 0 "$CREATED" "$CREATE_AT" ""; then
+          rm -f "$b"
+          echo "RECOVER_GONE: vm=$name"
+        else
+          recover_failed "$name" RECOVER_API_UNAVAILABLE "its create may still be in flight; rerun recover after UBI_CREATE_GRACE (${CREATE_GRACE}s)"
+        fi ;;
+      *)
+        rm -rf "$tmp"
+        recover_failed "$name" RECOVER_API_UNAVAILABLE "the Ubicloud API answered HTTP $code; nothing changed, rerun recover" ;;
+    esac
+  done
+  rm -f "$out"
+  [ "$RECOVER_FAILS" -eq 0 ]
+}
+
+# sink_check SPEC: https-put:<https URL> is the only network sink; file:<dir>
+# only under UBI_SINK_ALLOW_FILE=1 (tests). The URL is never printed.
+sink_check() {
+  case $1 in
+    https-put:https://*) [[ "${1#https-put:}" =~ ^https://[^[:space:]]+$ ]] && return 0 ;;
+    file:/*) [ "${UBI_SINK_ALLOW_FILE:-}" = 1 ] && return 0 ;;
+  esac
+  die "UBI_SINK_INVALID: a sink is https-put:<presigned https URL> (file:<absolute dir> only with UBI_SINK_ALLOW_FILE=1); got a '${1%%:*}:' spec. Nothing was created"
+}
+
+# SINK_SH: the VM-side pusher. Every SINK_INTERVAL seconds it packs
+# heartbeat.json and the SINK_PATHS entries under ~ (never ~/.ubirun-*, which
+# hold --pass values and the URL) into results.tgz and pushes it when they
+# changed, or every fifth interval regardless. A snapshot tar cannot read, or
+# one over UBI_SINK_MAX_MB, is skipped, so the last good one stays in the sink.
+# A failed or skipped push backs off and retries; it never ends the loop.
+# --once pushes one time and exits 1 with "seq= last_push= [sink_skipped=]".
+SINK_SH='#!/usr/bin/env bash
+. ~/.ubirun-sink.conf || exit 1
+once=0
+[ "${1:-}" != --once ] || once=1
+[ "$once" = 1 ] || echo $$ > ~/.ubirun-sink.pid
+seq=$(cat ~/.ubirun-sink.seq 2>/dev/null || echo 0)
+last=$(cat ~/.ubirun-sink.last 2>/dev/null || echo never)
+present() { P=(); local p; for p in ${SINK_PATHS[@]+"${SINK_PATHS[@]}"}; do [ ! -e "$HOME/$p" ] || P+=("$p"); done; }
+digest() { present; [ ${#P[@]} -gt 0 ] || { echo none; return 0; }; tar -cf - --exclude=".ubirun-*" -C "$HOME" "${P[@]}" 2>/dev/null | cksum; }
+beat() { printf "{\"vm\": \"%s\", \"owner\": \"%s\", \"seq\": %d, \"time\": \"%s\", \"last_push\": \"%s\", \"sink_skipped\": \"%s\"}\n" \
+  "$SINK_VM" "$SINK_OWNER" "$seq" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$last" "$2" > "$1/heartbeat.json"; }
+push() {
+  local d rc=0
+  skipped=""
+  d=$(mktemp -d "$HOME/.ubirun-sink.XXXXXX") || return 1
+  seq=$((seq + 1)); echo "$seq" > ~/.ubirun-sink.seq
+  present
+  beat "$d" ""
+  if [ ${#P[@]} -gt 0 ]; then
+    tar -czf "$d/results.tgz" --exclude=".ubirun-*" -C "$d" heartbeat.json -C "$HOME" "${P[@]}" 2>/dev/null || rc=$?
+    [ "$rc" -le 1 ] || skipped=tar_failed
+    [ -n "$skipped" ] || [ "$(wc -c < "$d/results.tgz")" -le $((SINK_MAX_MB * 1048576)) ] || skipped=size
+  else
+    tar -czf "$d/results.tgz" -C "$d" heartbeat.json
+  fi
+  if [ -n "$skipped" ]; then rm -rf "$d"; return 2; fi
+  rc=0
+  case $SINK_KIND in
+    file) { mkdir -p "$SINK_DIR/$SINK_VM" && cp "$d/results.tgz" "$SINK_DIR/$SINK_VM/.results.tgz.$$" \
+      && mv -f "$SINK_DIR/$SINK_VM/.results.tgz.$$" "$SINK_DIR/$SINK_VM/results.tgz"; } 2>/dev/null || rc=1 ;;
+    https-put) curl -sS --fail --max-time 120 -K "$HOME/.ubirun-sink.curl" -T "$d/results.tgz" >/dev/null 2>&1 || rc=1 ;;
+    *) rc=1 ;;
+  esac
+  rm -rf "$d"
+  [ "$rc" -ne 0 ] || { last=$(date +%s); echo "$last" > ~/.ubirun-sink.last; }
+  return "$rc"
+}
+if [ "$once" = 1 ]; then push && exit 0; echo "seq=$seq last_push=$last${skipped:+ sink_skipped=$skipped}"; exit 1; fi
+h="" beats=0 backoff=0
+while :; do
+  n=$(digest)
+  if [ "$n" != "$h" ] || [ "$beats" -ge 5 ]; then
+    if push; then h=$n; beats=0; backoff=0
+    else backoff=$(( backoff ? backoff * 2 : SINK_INTERVAL )); [ "$backoff" -le 900 ] || backoff=900; fi
+  else
+    beats=$((beats + 1))
+  fi
+  sleep $(( SINK_INTERVAL + backoff ))
+done
+'
+
+# SINK_STOP: end the running pusher (its process group, so an upload in
+# flight dies with it) and wait for it, so no older snapshot lands later.
+SINK_STOP='p=$(cat ~/.ubirun-sink.pid 2>/dev/null); if [ -n "$p" ]; then kill -TERM -- "-$p" 2>/dev/null || kill -TERM "$p" 2>/dev/null; for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do kill -0 "$p" 2>/dev/null || break; sleep 0.5; done; kill -KILL -- "-$p" 2>/dev/null; rm -f ~/.ubirun-sink.pid; fi;'
+
+# sink_start NAME SPEC PATH...: write the pusher's config (600; the URL only in
+# ~/.ubirun-sink.curl, over ssh stdin), upload it and start it outside any ssh
+# session, and mark the state dir so down flushes it.
+sink_start() {
+  local name=$1 spec=$2 kind interval=$SINK_INTERVAL url sdir=""
+  shift 2
+  kind=${spec%%:*}
+  [ "$kind" != file ] || sdir=${spec#file:}
+  [ "$kind" = file ] || [ "$interval" -ge 60 ] || interval=60
+  { printf 'SINK_KIND=%q\nSINK_DIR=%q\nSINK_VM=%q\nSINK_OWNER=%q\nSINK_INTERVAL=%q\nSINK_MAX_MB=%q\n' \
+      "$kind" "$sdir" "$name" "$OWNER" "$interval" "$SINK_MAX_MB"
+    printf 'SINK_PATHS=(%s)\n' "$(qwords "$@")"; } | remote "$name" 'umask 077 && cat > ~/.ubirun-sink.conf && chmod 600 ~/.ubirun-sink.conf'
+  if [ "$kind" = https-put ]; then
+    url=${spec#https-put:}; url=${url//\\/\\\\}; url=${url//\"/\\\"}
+    printf 'url = "%s"\n' "$url" | remote "$name" 'umask 077 && cat > ~/.ubirun-sink.curl && chmod 600 ~/.ubirun-sink.curl'
+  fi
+  printf %s "$SINK_SH" | remote "$name" 'umask 077 && cat > ~/.ubirun-sink.sh'
+  remote "$name" "$SINK_STOP"' if command -v setsid >/dev/null 2>&1; then setsid -f bash ~/.ubirun-sink.sh </dev/null >>~/.ubirun-sink.log 2>&1; else nohup bash ~/.ubirun-sink.sh </dev/null >>~/.ubirun-sink.log 2>&1 & fi' </dev/null >/dev/null
+  : >"$(state_dir "$name")/sink"
+  log "sink: pushing $# path(s) to a $kind sink every ${interval}s (pid in ~/.ubirun-sink.pid on $name)"
+}
+
+# sink_flush NAME: stop the pusher, then one last push before down destroys
+# NAME (150 s cap, above curl's 120). A failure prints SINK_FLUSH_FAILED and
+# adds NAME to SINK_FLUSH_FAILED, which turns a passing run or verify of that
+# VM into exit 1; the VM is destroyed either way.
+sink_flush() {
+  local out
+  if out=$(remote "$1" "$SINK_STOP"' timeout 150 bash ~/.ubirun-sink.sh --once' </dev/null 2>/dev/null); then
+    log "sink: final push done for $1"
+    return 0
+  fi
+  SINK_FLUSH_FAILED="$SINK_FLUSH_FAILED $1 "
+  out=$(tail -n 1 <<<"$out")
+  echo "SINK_FLUSH_FAILED: vm=$1 ${out:-seq=unknown last_push=unknown} (results in the sink may be incomplete)" >&2
 }
 
 new_name() {
@@ -938,7 +1283,7 @@ UP_NAME=""
 UP_READY=""
 cmd_up() {
   require_owner
-  local size=$DEFAULT_SIZE location=$DEFAULT_LOCATION name="" storage="" image=ubuntu-noble
+  local size=$DEFAULT_SIZE location=$DEFAULT_LOCATION name="" storage="" image=ubuntu-noble sink=${UBI_SINK:-} tags=() sink_paths=()
   while [ $# -gt 0 ]; do
     case $1 in
       -s|--size) size=$2; shift 2 ;;
@@ -946,11 +1291,17 @@ cmd_up() {
       -n|--name) name=$2; shift 2 ;;
       -S|--storage) check_storage "$2"; storage=$2; shift 2 ;;
       -b|--image) image=$2; shift 2 ;;
+      --tag) [[ "$2" =~ ^[A-Za-z0-9_.-]+=[A-Za-z0-9_.:/@+-]*$ ]] || die "up: --tag $2: expected key=value (letters, digits and _.:/@+- only)"; tags+=("$2"); shift 2 ;;
+      --sink) sink=$2; shift 2 ;;
+      --sink-path) [[ "$2" != /* && "/$2/" != */../* && -n "$2" ]] || die "up: --sink-path $2: must be a path under ~ on the VM"; sink_paths+=("$2"); shift 2 ;;
+      --counted) COUNTED=1; shift ;;
       *) die "up: unknown option $1" ;;
     esac
   done
   [ -n "$name" ] || name=$(new_name)
   valid_name "$name" || die "invalid VM name '$name' (Ubicloud allows 1-63 of a-z, 0-9 and '-', starting and ending with a letter or digit)"
+  [ "$COUNTED" != 1 ] || recovery_preflight
+  [ -z "$sink" ] || sink_check "$sink"
   if [ "$REAP" != 0 ]; then
     cmd_reap || log "reap failed; continuing"
   fi
@@ -959,33 +1310,86 @@ cmd_up() {
   fi
   quota_preflight "$location" "$name" "$size"
 
+  local pre probe
+  probe=$(mktemp)
+  pre=$(api "$probe" vm "$location/$name" show)
+  rm -f "$probe"
+  case $pre in
+    404) ;;
+    200) die "create refused: $location/$name already exists; nothing was created, and that VM is not this call's to adopt or destroy" ;;
+    *) die "create refused: could not check that $location/$name is free (HTTP $pre); nothing was created, rerun once the API answers" ;;
+  esac
+
   local dir create_at
   dir=$(state_dir "$name")
   mkdir -p "$dir"
   chmod 700 "$dir"
   ssh-keygen -q -t ed25519 -N '' -C "$name" -f "$dir/key"
+  [ ${#tags[@]} -eq 0 ] || printf '%s\n' "${tags[@]}" >"$dir/tags"
 
   local args=(vm "$location/$name" create -s "$size" -b "$image")
   [ -z "$storage" ] || args+=(-S "$storage")
   args+=("$(cat "$dir/key.pub")")
   create_at=$(date +%s)
+  log "creating $location/$name ($size)"
+  # Signals are held from before the create request until its answer is
+  # recorded. Teardown is armed (UP_NAME) only once the request is on its way
+  # and disarmed when Ubicloud refuses it (HTTP 4xx): a refused create made
+  # nothing, and a VM that answers to the name (a 409) is not this call's.
+  local interrupted="" created code err refusal need used max
+  trap 'interrupted=1' INT TERM HUP QUIT
   write_state "$name" "$location" "$size" "" unknown "$create_at"
+  bundle_save "$name"
   record_vm "$name" "$location"
   UP_NAME=$name
-  log "creating $location/$name ($size)"
-  # Hold signals until the create answer is recorded, so teardown knows
-  # whether the VM exists instead of waiting out UBI_CREATE_GRACE.
-  local interrupted="" created=yes refusal need used max
-  trap 'interrupted=1' INT TERM HUP QUIT
-  cli "${args[@]}" >/dev/null 2>"$dir/create.err" || created=no
-  write_state "$name" "$location" "$size" "" "$created" "$create_at"
+  code=$(api "$dir/create.err" "${args[@]}")
+  case $code in
+    200) created=yes ;;
+    4[0-9][0-9]) created=no ;;
+    *) created=unknown UP_NAME="" ;;
+  esac
+  if [ "$created" = no ]; then
+    UP_NAME=""
+    err=$(cat "$dir/create.err")
+    rm -rf "$dir"
+    forget_vm "$name"
+    [ -z "$RECOVERY_DIR" ] || rm -f "$RECOVERY_DIR/$OWNER/$name.bundle"
+  else
+    write_state "$name" "$location" "$size" "" "$created" "$create_at"
+    [ "$created" = unknown ] || bundle_save "$name"
+  fi
   trap 'exit 130' INT TERM HUP QUIT
   [ -z "$interrupted" ] || exit 130
+  if [ "$created" = unknown ]; then
+    # A 5xx or no answer (000) is not a refusal: the VM may exist. Look it up
+    # by name until it shows or UBI_CREATE_GRACE has passed. Another caller can
+    # take the name between the check and the create (a lost 409), so teardown
+    # stays off until this call's key opens the VM.
+    log "create of $location/$name answered HTTP $code; looking it up by name before deciding"
+    local seen_code
+    while :; do
+      seen_code=$(api "$dir/lookup.out" vm "$location/$name" show)
+      [ "$seen_code" != 200 ] || break
+      [ $(( $(date +%s) - create_at )) -lt "$CREATE_GRACE" ] || break
+      sleep "$POLL"
+    done
+    rm -f "$dir/lookup.out"
+    case $seen_code in
+      200) created=yes ;;
+      404) created=no ;;
+    esac
+    write_state "$name" "$location" "$size" "" "$created" "$create_at"
+    case $created in
+      yes) bundle_save "$name"; log "create of $location/$name went through; teardown waits until this call's key opens it" ;;
+      no) cat "$dir/create.err" >&2; rm -rf "$dir"; forget_vm "$name"; [ -z "$RECOVERY_DIR" ] || rm -f "$RECOVERY_DIR/$OWNER/$name.bundle"; die "create failed (HTTP $code): $location/$name was still absent ${CREATE_GRACE}s after the request" ;;
+      unknown) die "UBI_CREATE_UNKNOWN: could not tell whether $location/$name exists (create answered HTTP $code, its lookup HTTP $seen_code); its record and recovery bundle stay, nothing destroys it, and this owner's reap destroys it once its -t<hours> TTL ends; check with: $0 list" ;;
+    esac
+  fi
   if [ "$created" = no ]; then
-    refusal=$(sed -n 's/.*Requested vCPU count: \([0-9]*\), currently used vCPU count: \([0-9]*\), maximum allowed vCPU count: \([0-9]*\).*/\1 \2 \3/p' "$dir/create.err")
+    refusal=$(sed -n 's/.*Requested vCPU count: \([0-9]*\), currently used vCPU count: \([0-9]*\), maximum allowed vCPU count: \([0-9]*\).*/\1 \2 \3/p' <<<"$err")
     if [ -z "$refusal" ]; then
-      cat "$dir/create.err" >&2
-      die "create failed"
+      printf '%s\n' "$err" >&2
+      die "create failed (HTTP $code); nothing was created"
     fi
     read -r need used max <<<"$refusal"
     echo "$max" >"$STATE_ROOT/quota-max"
@@ -1005,15 +1409,26 @@ cmd_up() {
     sleep "$POLL"
   done
   write_state "$name" "$location" "$size" "$ip" yes "$create_at"
+  bundle_save "$name"
 
   load "$name"
-  deadline=$(( $(date +%s) + 300 ))
+  deadline=$(( $(date +%s) + SSH_WAIT ))
+  local proof=()
+  [ -n "$UP_NAME" ] || proof=(-F /dev/null)
   # shellcheck disable=SC2046
-  until ssh $(ssh_opts) "ubi@$IP" true 2>/dev/null; do
-    [ "$(date +%s)" -lt "$deadline" ] || die "SSH did not come up on $IP"
+  until ssh ${proof[@]+"${proof[@]}"} $(ssh_opts) "ubi@$IP" true 2>/dev/null; do
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      [ -z "$UP_NAME" ] || die "SSH did not come up on $IP"
+      die "UBI_CREATE_UNKNOWN: $location/$name answers its name after a create that answered HTTP $code, but this call's key did not open it in ${SSH_WAIT}s, so it may be another caller's; nothing destroys it, its record and recovery bundle stay, and this owner's reap destroys it once its -t<hours> TTL ends; check with: $0 list"
+    fi
     sleep "$POLL"
   done
+  [ -n "$UP_NAME" ] || { UP_NAME=$name; log "this call's key opened $name; teardown armed"; }
   remote "$name" 'cloud-init status --wait >/dev/null 2>&1 || true'
+  if [ -n "$sink" ]; then
+    sink_start "$name" "$sink" ${sink_paths[@]+"${sink_paths[@]}"}
+    bundle_save "$name"
+  fi
   UP_READY=1
   log "ready: $name ($IP)"
   echo "$name"
@@ -1039,20 +1454,27 @@ cmd_down() {
   if [ -f "$dir/env" ]; then
     load "$name"
     loc=$LOCATION
+    [ ! -f "$dir/sink" ] || [ -z "$IP" ] || sink_flush "$name"
     if [ -S "$dir/ctl" ] && [ -n "$IP" ]; then
       # shellcheck disable=SC2046
       ssh $(ssh_opts) -O exit "ubi@$IP" >/dev/null 2>&1 || true
     fi
   fi
 
-  local deadline=$(( $(date +%s) + DOWN_TIMEOUT )) seen=0 asked=0 out code now
+  local deadline=$(( $(date +%s) + DOWN_TIMEOUT )) seen=0 asked=0 out code now rows unlisted=0
   out=$(mktemp)
   while :; do
     now=$(date +%s)
     if [ -z "$loc" ]; then
-      loc=$(vm_rows 2>/dev/null | awk -v n="$name" '$2==n {print $1}') || loc=""
-      code=404
-      [ -z "$loc" ] || code=$(api "$out" vm "$loc/$name" show)
+      if rows=$(vm_rows 2>/dev/null); then
+        loc=$(awk -v n="$name" '$2==n {print $1}' <<<"$rows")
+        code=404
+        [ -z "$loc" ] || code=$(api "$out" vm "$loc/$name" show)
+      else
+        code=unlisted
+        [ "$unlisted" = 1 ] || log "could not read the project's VM list; $name is not counted as gone"
+        unlisted=1
+      fi
     else
       code=$(api "$out" vm "$loc/$name" show)
     fi
@@ -1070,11 +1492,11 @@ cmd_down() {
         log "destroy requested: $loc/$name"
       fi
     elif [ "$code" = 404 ]; then
-      if [ "$seen" = 1 ] || [ "$CREATED" != unknown ] || { [ $(( now - CREATE_AT )) -ge "$CREATE_GRACE" ] \
-        && { [ "$CREATE_PID" = "$$" ] || ! kill -0 "$CREATE_PID" 2>/dev/null; }; }; then
+      if vm_gone_final "$seen" "$CREATED" "$CREATE_AT" "$CREATE_PID"; then
         rm -f "$out"
         rm -rf "$dir"
         forget_vm "$name"
+        [ -z "$RECOVERY_DIR" ] || rm -f "$RECOVERY_DIR"/*/"$name.bundle"
         if [ "$seen" = 1 ]; then log "destroyed ${loc:-?}/$name"; else log "gone: ${loc:-?}/$name (never existed or already destroyed)"; fi
         return 0
       fi
@@ -1107,11 +1529,31 @@ cmd_down() {
 # options at the first operand and resolves -T names after a -C, so no single
 # tar command line works on both it and GNU tar (#3680). COPYFILE_DISABLE=1
 # keeps Apple's tar from adding ._* AppleDouble entries for files with
-# extended attributes, which the VM would see as untracked files.
+# extended attributes, which the VM would see as untracked files. A
+# subdirectory of a work tree ships the same file set without a .git: git's
+# local transport fetches only from a repository's root, and the whole
+# repository's .git would show the VM every file outside the subdirectory as
+# deleted (GST-935). A subdirectory git lists no files under (one the parent
+# ignores) is refused rather than shipped empty: cmd_run keys the run on the
+# local files and skips the tree check for a subdirectory, so an empty upload
+# would pass on content that never ran.
 cmd_pack() {
   local src tmp gitdir branch head entry
   src=$(cd "${1:-.}" && pwd)
-  if git -C "$src" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  if git -C "$src" rev-parse --is-inside-work-tree >/dev/null 2>&1 && [ -n "$(git -C "$src" rev-parse --show-prefix)" ]; then
+    [ -n "$(git -C "$src" ls-files -co --exclude-standard | head -n 1)" ] \
+      || die "pack: git lists no files under $src (ignored by its checkout, or empty); nothing to ship"
+    (
+      cd "$src"
+      export COPYFILE_DISABLE=1
+      git ls-files -z -co --exclude-standard \
+        | while IFS= read -r -d '' f; do
+            if [ -e "$f" ] || [ -L "$f" ]; then printf '%s\0' "$f"; fi
+          done \
+        | tar --null -T - -cf - \
+        | gzip -c
+    )
+  elif git -C "$src" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     head=$(git -C "$src" rev-parse --verify -q HEAD) || die "pack: $src has no commits; the VM needs a HEAD to fingerprint"
     branch=$(git -C "$src" symbolic-ref -q --short HEAD || true)
     tmp=$(mktemp -d)
@@ -1186,21 +1628,39 @@ cmd_sync() {
 # Relative remote paths start at /home/ubi. A glob that matches nothing (for
 # example an optional flake ledger) is reported and skipped, not a failure.
 cmd_pull() {
-  local name=$1 from=$2 to=$3 dir
+  local name=$1 from=$2 to=$3 dir rc=0
   dir=$(printf %q "$(dirname "$from")")
-  if ! remote "$name" "cd $dir 2>/dev/null && ls -d -- $(basename "$from") >/dev/null 2>&1"; then
-    log "pull: nothing matches $from"
-    return 0
-  fi
+  remote "$name" "cd $dir 2>/dev/null || exit 3; ls -d -- $(basename "$from") >/dev/null 2>&1 || exit 3" || rc=$?
+  case $rc in
+    0) ;;
+    3) log "pull: nothing matches $from"; return 0 ;;
+    *) log "pull failed: could not check $from on $name (exit $rc)"; return 1 ;;
+  esac
   mkdir -p "$to"
   remote "$name" "cd $dir && tar -czf - $(basename "$from")" | tar -xzf - -C "$to"
 }
 
-# pass_name NAME: a variable this runner may forward to a VM. Its own
-# credentials (UBICLOUD_*) never leave this machine, whoever asks.
+# pass_name NAME: a variable this runner may forward to a VM: one the caller's
+# environment held when the runner started. Its own credentials (UBICLOUD_*),
+# its recovery secret and sink URL, and every variable it sets itself
+# (RECOVERY_SECRET holds the Ubicloud key by default) never leave this machine.
 pass_name() {
   [[ "$1" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || die "--pass $1: not a variable name"
   case $1 in UBICLOUD_*) die "--pass $1: the runner never forwards its own Ubicloud credentials to a VM" ;; esac
+  case $1 in RECOVERY_SECRET|UBI_RECOVERY_KEY|UBI_SINK) die "--pass $1: the runner never forwards its recovery secret or sink URL to a VM" ;; esac
+  case $1 in INHERITED_NAMES|INHERITED_VALUES|INHERITED_ENV|PASS_VALUE|_ubi_n) die "--pass $1: the runner never forwards its own variables" ;; esac
+  [[ "$INHERITED_ENV" == *" $1 "* ]] || die "--pass $1: not in this shell's environment; the runner forwards only variables you exported, never its own"
+}
+
+# inherited NAME: PASS_VALUE becomes NAME's value as the caller exported it.
+inherited() {
+  local i
+  for i in "${!INHERITED_NAMES[@]}"; do
+    [ "${INHERITED_NAMES[i]}" = "$1" ] || continue
+    PASS_VALUE=${INHERITED_VALUES[i]}
+    return 0
+  done
+  die "--pass $1: not in this shell's environment"
 }
 
 # inside_dir DIR ROOT: DIR resolves, symlinks followed, to ROOT or below it.
@@ -1231,16 +1691,23 @@ PULL_ROOT=""
 run_teardown() {
   local rc=$1 rows left others
   trap "" INT TERM HUP QUIT
-  cmd_down "$RUN_VM" || log "WARNING: failed to destroy $RUN_VM; run: $0 down $RUN_VM"
+  [ -z "$UP_NAME" ] || cmd_down "$RUN_VM" || log "WARNING: failed to destroy $RUN_VM; run: $0 down $RUN_VM"
   if rows=$(vm_rows 2>/dev/null); then
     left=$(awk -v n="$RUN_VM" '$2==n' <<<"$rows" | grep -c . || true)
     others=$(awk -v n="$RUN_VM" -v o="$OWNER" '$3==o && $2!=n' <<<"$rows" | grep -c . || true)
   else
     left=unknown others=unknown
   fi
+  if [ -z "$UP_NAME" ]; then
+    left=0
+    [ ! -f "$(state_dir "$RUN_VM")/env" ] || left=unknown
+  fi
   leftover "left=$left owner=$OWNER vm=$RUN_VM others=$others"
-  [ "$left" = 0 ] && return 0
-  log "VM cleanup not confirmed for $RUN_VM (left=$left); destroy it with: $0 down $RUN_VM"
+  if [ "$left" = 0 ]; then
+    [[ "$SINK_FLUSH_FAILED" != *" $RUN_VM "* ]] || [ "$rc" -ne 0 ] || exit 1
+    return 0
+  fi
+  [ -z "$UP_NAME" ] || log "VM cleanup not confirmed for $RUN_VM (left=$left); destroy it with: $0 down $RUN_VM"
   [ "$rc" -ne 0 ] || exit 1
 }
 
@@ -1248,16 +1715,21 @@ TIER_NAMES=() TIER_CMDS=() RESUME=1 RERUN_FAILED=0 FORCE_ATTACH="" RUN_ARGS=()
 cmd_run() {
   require_owner
   local up_args=() src=. dest="" setup="" keep=0 pulls=() envs=() passes=() key_inputs=() probe=0
-  RUN_ARGS=("$@")
+  # The run record replays RUN_ARGS on attach. Each option's words are copied as
+  # it is parsed, so a --sink URL stays out of it (pass it as UBI_SINK).
+  local all=("$@") pos=0 opt left
+  RUN_ARGS=()
   while [ $# -gt 0 ]; do
+    opt=$1 left=$#
     case $1 in
       -S|--storage) check_storage "$2"; up_args+=("$1" "$2"); shift 2 ;;
-      -s|--size|-l|--location|-n|--name|-b|--image) up_args+=("$1" "$2"); shift 2 ;;
+      -s|--size|-l|--location|-n|--name|-b|--image|--tag|--sink|--sink-path) up_args+=("$1" "$2"); shift 2 ;;
+      --counted) COUNTED=1; shift ;;
       --src) src=$2; shift 2 ;;
       --dest) dest=$2; shift 2 ;;
       --setup) setup=$2; shift 2 ;;
       --env) envs+=("$2"); shift 2 ;;
-      --pass) pass_name "$2"; [ -n "${!2+x}" ] || die "--pass $2: not set locally"; passes+=("$2"); shift 2 ;;
+      --pass) pass_name "$2"; passes+=("$2"); shift 2 ;;
       --pull) pulls+=("$2"); shift 2 ;;
       --keep) keep=1; shift ;;
       --key-input) key_inputs+=("$2"); shift 2 ;;
@@ -1268,16 +1740,21 @@ cmd_run() {
       --) shift; break ;;
       *) die "run: unknown option $1" ;;
     esac
+    [ "$opt" = --sink ] || RUN_ARGS+=("${all[@]:pos:left-$#}")
+    pos=$(( pos + left - $# ))
   done
+  [ "$pos" -ge ${#all[@]} ] || RUN_ARGS+=("${all[@]:pos}")
   [ $# -gt 0 ] || [ ${#TIER_NAMES[@]} -gt 0 ] || die "run: missing command after --"
   [ -z "$setup" ] || [ -f "$setup" ] || die "setup script not found: $setup"
   command -v git >/dev/null || die "git is required: the run key fingerprints the checkout with it"
   src=$(cd "$src" && pwd)
   [ -n "$dest" ] || dest="work/$(basename "$src")"
 
-  local i name="" size=$DEFAULT_SIZE location=$DEFAULT_LOCATION image=ubuntu-noble storage="" e n
+  local i name="" size=$DEFAULT_SIZE location=$DEFAULT_LOCATION image=ubuntu-noble storage="" e n sink=${UBI_SINK:-} sink_paths=()
   for (( i = 0; i < ${#up_args[@]}; i += 2 )); do
     case ${up_args[i]} in
+      --sink) sink=${up_args[i+1]} ;;
+      --sink-path) sink_paths+=("${up_args[i+1]}") ;;
       -n|--name) name=${up_args[i+1]} ;;
       -s|--size) size=${up_args[i+1]} ;;
       -l|--location) location=${up_args[i+1]} ;;
@@ -1295,7 +1772,7 @@ cmd_run() {
       printf 'command %q\n' "$*"
       if [ -n "$setup" ]; then echo "setup $(sha256 <"$setup")"; else echo "setup none"; fi
       for e in ${envs[@]+"${envs[@]}"}; do printf 'env %q\n' "$e"; done
-      for n in ${passes[@]+"${passes[@]}"}; do printf 'pass %s %s\n' "$n" "$(printf %s "${!n}" | sha256)"; done
+      for n in ${passes[@]+"${passes[@]}"}; do inherited "$n"; printf 'pass %s %s\n' "$n" "$(printf %s "$PASS_VALUE" | sha256)"; done
       printf 'vm %q %q %q %q\n' "$size" "$location" "$image" "$storage"
       echo "base $(base_sha "$src")"
       echo "runner $(sha256 <"${BASH_SOURCE[0]}")"
@@ -1307,10 +1784,10 @@ cmd_run() {
 
   local attach=""
   if [ -n "$FORCE_ATTACH" ]; then
-    vm_alive "$FORCE_ATTACH" || die "attach: $FORCE_ATTACH no longer exists; rerun the original command to start fresh"
+    vm_alive "$FORCE_ATTACH" || { [ $? -ne 2 ] || die "UBI_ATTACH_UNKNOWN: could not check whether $FORCE_ATTACH still exists; nothing created, rerun"; die "attach: $FORCE_ATTACH no longer exists; rerun the original command to start fresh"; }
     attach=$FORCE_ATTACH
   else
-    attach=$(find_record)
+    attach=$(find_record) || die "UBI_ATTACH_UNKNOWN: a run record for this key names a VM the Ubicloud API could not check; nothing created (a new VM would leave that one billing), rerun"
   fi
   if [ "$probe" = 1 ]; then
     if [ -z "$attach" ]; then echo "UBI_ATTACH_INFO: none key=${RUN_KEY:0:12}"
@@ -1347,6 +1824,16 @@ cmd_run() {
     cmd_down "$attach" >/dev/null || log "WARNING: failed to destroy $attach; run: $0 down $attach"
     attach=""
   fi
+  if [ -n "$attach" ] && [ "$COUNTED" = 1 ]; then
+    recovery_preflight
+    local opened rbt
+    rbt=$(mktemp -d)
+    opened=0
+    printf %s "$RECOVERY_SECRET" | python3 -c "$RB_PY" open "$RECOVERY_DIR/$OWNER/$attach.bundle" "$rbt" "$attach" "$OWNER" 2>/dev/null && opened=1
+    rm -rf "$rbt"
+    [ "$opened" = 1 ] \
+      || die "UBI_RECOVERY_REQUIRED: a counted run would reattach to $attach, which has no recovery bundle under $RECOVERY_DIR/$OWNER that opens under this secret; destroy it ($0 down $attach) and rerun"
+  fi
   [ -z "$attach" ] || name=$attach
   [ -n "$name" ] || { name=$(new_name); up_args+=(-n "$name"); }
   RUN_VM=$name
@@ -1356,14 +1843,20 @@ cmd_run() {
   trap 'exit 130' INT TERM QUIT
   trap on_hup HUP
   if [ -n "$attach" ]; then
+    UP_NAME=$name
     load "$name"
     log "reattached to $name created_at=$CREATE_AT key=${RUN_KEY:0:12}"
+    if [ -n "$sink" ]; then
+      sink_check "$sink"
+      sink_start "$name" "$sink" ${sink_paths[@]+"${sink_paths[@]}"}
+      bundle_save "$name"
+    fi
   else
     cmd_up "${up_args[@]}" >/dev/null
     trap 'exit 130' INT TERM QUIT
     trap on_hup HUP
     if [[ "$name" =~ -t([0-9]+)$ ]]; then
-      log "$name carries a ${BASH_REMATCH[1]}h TTL (any later run of this script reaps it); if this process dies first: $0 down $name"
+      log "$name carries a ${BASH_REMATCH[1]}h TTL (this owner's next up or reap destroys it once it expires); if this process dies first: $0 down $name"
     elif [[ "$name" =~ ^$PREFIX-$OWNER-[0-9]{10}- ]]; then
       log "$name has no TTL (reap destroys it once it is ${LEGACY_HOURS}h old); if this process dies before its teardown line, destroy it with: $0 down $name"
     else
@@ -1385,11 +1878,13 @@ cmd_run() {
   qdest=$(printf %q "$dest")
   if [ ! -f "$dir/synced" ]; then
     { for e in ${envs[@]+"${envs[@]}"}; do printf 'export %s=%q\n' "${e%%=*}" "${e#*=}"; done
-      for n in ${passes[@]+"${passes[@]}"}; do printf 'export %s=%q\n' "$n" "${!n}"; done; } \
+      for n in ${passes[@]+"${passes[@]}"}; do inherited "$n"; printf 'export %s=%q\n' "$n" "$PASS_VALUE"; done; } \
       | remote "$name" 'umask 077 && cat > ~/.ubirun-env'
     cmd_sync "$name" "$src" "$dest"
-    # A subdirectory of a checkout uploads the whole .git with only its own
-    # files, so its tree is compared VM to VM (tiers) but not to this side.
+    # A subdirectory of a checkout ships without a .git, and its local tree
+    # (a scratch repository, blind to the parent's ignore rules) can count
+    # files pack leaves out, so it is compared VM to VM (tiers) but not to
+    # this side.
     if [ -z "$(git -C "$src" rev-parse --show-prefix 2>/dev/null)" ]; then
       vmt=$(vm_tree "$name" "$qdest") || vmt=unavailable
       if [ "$vmt" != "$TREE" ]; then
@@ -1420,7 +1915,7 @@ cmd_run() {
       [ "$rc" -ne 0 ] || rc=1
       continue
     fi
-    cmd_pull "$name" "${p%%:*}" "${p#*:}" || log "pull failed: $p"
+    cmd_pull "$name" "${p%%:*}" "${p#*:}" || { log "pull failed: $p"; [ "$rc" -ne 0 ] || rc=1; }
   done
   [ ${#TIER_NAMES[@]} -eq 0 ] || verify_line
   return "$rc"
@@ -1521,8 +2016,8 @@ print("cfg_cmd=" + q(c.get("command", "")))
     case $1 in
       --) shift; user_cmd=("$@"); break ;;
       --trust-config) trust=1; shift ;;
-      --keep|--resume|--no-resume|--rerun-failed|--probe) user_pre+=("$1"); shift ;;
-      --pass|-S|--storage|-s|--size|-l|--location|-n|--name|-b|--image|--src|--dest|--setup|--env|--pull)
+      --keep|--resume|--no-resume|--rerun-failed|--probe|--counted) user_pre+=("$1"); shift ;;
+      --pass|-S|--storage|-s|--size|-l|--location|-n|--name|-b|--image|--src|--dest|--setup|--env|--pull|--tag|--sink|--sink-path)
         [ $# -ge 2 ] || die "verify: $1 needs a value"
         [ "$1" != --pass ] || granted+=("$2")
         user_pre+=("$1" "$2"); shift 2 ;;
@@ -1564,9 +2059,19 @@ usage: ubi-runner.sh <command> [args]
                          here (--pass NAME, or all: --trust-config). With tiers, a pass checkpoint
                          under the same run key is reused (resume is the default)
   attach NAME            resume the run recorded for NAME on this machine, as a rerun would
-  up [-s SIZE] [-l LOCATION] [-n NAME] [-S STORAGE_GIB] [-b IMAGE]
+  up [-s SIZE] [-l LOCATION] [-n NAME] [-S STORAGE_GIB] [-b IMAGE] [--tag K=V]...
+     [--sink https-put:URL] [--sink-path PATH]... [--counted]
                          create a VM and wait for SSH; prints its name
-                         (STORAGE_GIB: one of $ALLOWED_STORAGE)
+                         (STORAGE_GIB: one of $ALLOWED_STORAGE). --tag is kept in the VM's
+                         state and recovery bundle; --sink starts a pusher on the VM that
+                         uploads heartbeat.json and the PATH entries under ~ as results.tgz;
+                         --counted (or UBI_COUNTED=1) refuses without a recovery bundle
+                         (UBI_RECOVERY_REQUIRED, UBI_RECOVERY_UNAVAILABLE). run and verify
+                         take the same four options
+  recover [--owner OLD] [--dir DIR]
+                         rebuild this machine's state for the VMs with a bundle under
+                         DIR/OLD (UBI_RECOVERY_DIR, this owner); prints RECOVERED, RECOVER_GONE
+                         or RECOVER_FAILED per VM. Run it only once the creating machine is dead
   ssh NAME [COMMAND]     shell or login-shell command on the VM (user ubi, passwordless sudo)
   sync NAME [SRC] [DEST] stream a checkout (tracked + untracked-unignored + .git)
   pack [SRC]             write that checkout tarball to stdout
@@ -1579,8 +2084,8 @@ usage: ubi-runner.sh <command> [args]
   owner                  print this caller's owner tag ($OWNER)
   records                VMs this machine created and has not confirmed gone ($VM_RECORD)
   gc HOURS               destroy this owner's VMs older than HOURS (never other owners')
-  reap                   destroy every VM whose -t<hours> TTL has ended (any owner) and this
-                         owner's TTL-less ubirun-* VMs older than UBI_LEGACY_HOURS
+  reap                   destroy this owner's VMs whose -t<hours> TTL has ended and its
+                         TTL-less ubirun-* VMs older than UBI_LEGACY_HOURS (never other owners')
   cli ARGS...            raw Ubicloud CLI passthrough (e.g. cli vm list)
 
 signals: INT and TERM tear the VM down. HUP, once a remote phase is live, detaches
@@ -1600,7 +2105,10 @@ env: UBI_TTL_HOURS (${TTL_HOURS}h in the name, 1-999), UBI_REAP (0: up skips the
      UBI_GC_HOURS (unset/0: no sweep on up), UBI_CREATE_GRACE (${CREATE_GRACE}s),
      UBI_DOWN_TIMEOUT (${DOWN_TIMEOUT}s), UBI_API_TIMEOUT (${API_TIMEOUT}s), UBI_VM_RECORD (scratch VM-id file),
      UBI_ALLOWED_STORAGE (the -S sizes Ubicloud accepts; default "320 640"),
-     UBI_CHECKPOINT_DIR (tier checkpoints; $CHECKPOINT_DIR), UBI_CHECKPOINT_MAX_AGE (${CHECKPOINT_MAX_AGE}s a pass is reused)
+     UBI_CHECKPOINT_DIR (tier checkpoints; $CHECKPOINT_DIR), UBI_CHECKPOINT_MAX_AGE (${CHECKPOINT_MAX_AGE}s a pass is reused),
+     UBI_RECOVERY_DIR (recovery bundles; GSTACK_CAPY_RECOVERY_DIR on Capy), UBI_RECOVERY_KEY (bundle secret;
+     else UBICLOUD_API_KEY), UBI_COUNTED, UBI_SINK (a sink spec), UBI_SINK_INTERVAL (${SINK_INTERVAL}s, at least 60
+     for https-put), UBI_SINK_MAX_MB (${SINK_MAX_MB}: a bigger results.tgz is skipped, sink_skipped=size)
 EOF
 }
 
@@ -1625,6 +2133,7 @@ case $cmd in
   unpack) cmd_unpack "$@" ;;
   pull) cmd_pull "$@" ;;
   down) cmd_down "$@" ;;
+  recover) cmd_recover "$@" ;;
   list) cmd_list "$@" ;;
   usage) cmd_usage ;;
   owner) echo "$OWNER" ;;

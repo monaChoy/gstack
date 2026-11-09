@@ -18,7 +18,7 @@ const BIN = path.join(ROOT, 'bin', 'gstack-outside-voice');
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'outside-runner-'));
 afterAll(() => fs.rmSync(TMP, { recursive: true, force: true }));
 
-const REVIEW = `INPUT: ceo abc\n\n[P2] The install check lies by omission.\n\nRecommendation: revise because the premise is unmeasured.\n`;
+const REVIEW = `INPUT: ceo abc\n\n[P2] The install check lies by omission.\n\nRecommendation: revise because the premise is unmeasured.\nVERDICT: FINDINGS\n`;
 const promptFile = path.join(TMP, 'prompt.md');
 fs.writeFileSync(promptFile, 'You are the outside CEO reviewer.\n');
 
@@ -111,6 +111,12 @@ describe('host-subagent runner', () => {
     expect(meta.input_sha256).toMatch(/^[0-9a-f]{64}$/);
     expect(meta.output_sha256).toMatch(/^[0-9a-f]{64}$/);
     expect(meta.verdict.verdict).toBe('clean');
+  });
+  test('prints the shared FINDINGS label: a numbered finding with no P-tag is unspecified, never none (#3925)', () => {
+    const result = path.join(ROOT, 'test', 'fixtures', 'outside-review-severity', 'codex-3925', 'nonblocking-numbered.txt');
+    const r = run(['run', '--runner', 'host-subagent', '--gate', 'structured', '--prompt', promptFile, '--out', path.join(TMP, 'host-3925.md'), '--result', result, '--model', 'openai/gpt-6-astra', '--native-model', 'claude-opus-4-7'], cleanEnv(emptyBin));
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toContain('VERDICT: unverified\nFINDINGS: unspecified\n');
   });
   test('without --result or --model it is unavailable (exit 3, OUTSIDE_RUNNER_UNAVAILABLE)', () => {
     const r = run(['run', '--runner', 'host-subagent', '--prompt', promptFile, '--out', path.join(TMP, 'no.md'), '--model', 'gpt-5.4'], cleanEnv(emptyBin));

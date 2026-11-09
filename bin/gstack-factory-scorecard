@@ -4,14 +4,14 @@
  * read from GitHub through gh: merged PRs (crew vs outside), lead time (created
  * to merged, READY to merged), gate runs with known cost, red-train rate, flaky
  * events, issues opened vs closed, releases cut. Markdown table on stdout plus
- * a CSV; /retro Step 7.5 runs it; docs/recommended-harness.md explains each
+ * a CSV; /retro Step 7.5 runs it; crew/docs/recommended-harness.md explains each
  * line and where gstack's own numbers stand. Read-only: no write, no paid work.
  *
  * Usage:
  *   gstack-factory-scorecard [--repo owner/name] [--base main] [--since-days 7]
  *       [--crew login,login] [--gate-workflow evals.yml] [--gate-event workflow_dispatch|any]
  *       [--free-workflow free-tests.yml] [--train-prefix train/] [--ready-marker <regex>]
- *       [--pass-marker <regex>] [--pass-cap 3] [--max-artifact-runs 60]
+ *       [--pass-marker <regex>] [--pass-cap 2] [--max-artifact-runs 60]
  *       [--out-dir <dir>] [--csv <file>] [--json] [--cache-dir <dir>]
  *       [--fixtures <recorded gh responses.json>] [--now <iso>]
  *

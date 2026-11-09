@@ -9,7 +9,7 @@
  * Used by skill:check and CI freshness checks.
  */
 
-import { discoverTemplates, discoverSectionTemplates, includesSkill } from './discover-skills';
+import { discoverTemplates, discoverSectionTemplates, includesSkill, RETIRED_SKILLS } from './discover-skills';
 import { externalSkillName, extractNameAndDescription } from './external-skill-names';
 export { extractNameAndDescription } from './external-skill-names';
 import { generateLlmsTxt } from './gen-llms-txt';
@@ -55,6 +55,8 @@ export interface GenerationOptions {
   catalogMode?: 'trim' | 'full';
   explainLevel?: 'default' | 'terse';
   respectDetection?: boolean;
+  /** A detection result the caller already read; wins over respectDetection so one read serves identity and render. */
+  gbrainDetected?: boolean;
   log?: (message: string) => void;
   planMode?: boolean;
   /** Module loadout (scripts/modules.ts selectModules); null/undefined = `full`. */
@@ -94,7 +96,7 @@ export interface GenerationResult {
 }
 
 /** Canonical generation never reads local detection state unless opted in. */
-function loadGbrainOverride(respectDetection: boolean): boolean {
+export function loadGbrainOverride(respectDetection: boolean): boolean {
   if (!respectDetection) return false;
   const stateDir = resolveStateRoot();
   try {
@@ -484,13 +486,21 @@ policy:
 
 /**
  * Transform frontmatter for external hosts.
- * Claude: strips `sensitive:` field (only Factory uses it).
+ * Claude: strips template-only fields, adds disable-model-invocation to manual_only skills.
  * Codex: keeps name + description only, enforces 1024-char limit.
  * Factory: keeps name + description + user-invocable, conditionally adds disable-model-invocation.
  */
 function transformFrontmatter(content: string, host: Host): string {
   const hostConfig = getHostConfig(host);
   const fm = hostConfig.frontmatter;
+  const templateFrontmatter = content.startsWith('---\n') ? content.slice(4, content.indexOf('\n---', 4)) : '';
+  const escape = (s: unknown) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const conditionalLines = (fm.conditionalFields || [])
+    .filter(rule => Object.entries(rule.if).every(([k, v]) => new RegExp(`^${escape(k)}:[ \\t]*${escape(v)}[ \\t]*$`, 'm').test(templateFrontmatter)))
+    .flatMap(rule => Object.entries(rule.add))
+    .filter(([key]) => !new RegExp(`^${escape(key)}:`, 'm').test(templateFrontmatter))
+    .map(([key, value]) => `${key}: ${value}\n`)
+    .join('');
 
   if (fm.mode === 'denylist') {
     // Denylist mode: strip listed fields, keep everything else
@@ -501,7 +511,7 @@ function transformFrontmatter(content: string, host: Host): string {
         content = content.replace(new RegExp(`^${field}:\\s*.*\\n`, 'm'), '');
       }
     }
-    return content;
+    return conditionalLines ? content.replace('\n---\n', () => `\n${conditionalLines}---\n`) : content;
   }
 
   // Allowlist mode: reconstruct frontmatter with only allowed fields
@@ -544,19 +554,7 @@ function transformFrontmatter(content: string, host: Host): string {
     }
   }
 
-  // Add conditional fields
-  if (fm.conditionalFields) {
-    for (const rule of fm.conditionalFields) {
-      const match = Object.entries(rule.if).every(([k, v]) =>
-        new RegExp(`^${k}:\\s*${v}`, 'm').test(frontmatter)
-      );
-      if (match) {
-        for (const [key, value] of Object.entries(rule.add)) {
-          newFm += `${key}: ${value}\n`;
-        }
-      }
-    }
-  }
+  newFm += conditionalLines;
 
   // Preserve additional keepFields beyond name and description
   if (fm.keepFields) {
@@ -757,9 +755,10 @@ function processExternalHost(
   const hostConfig = getHostConfig(host);
 
   const name = externalSkillName(skillDir === '.' ? '' : skillDir, frontmatterName);
+  const retired = RETIRED_SKILLS.includes(skillDir);
   // --out-dir mirrors the host tree (outputs only; inputs read from ROOT).
-  const outputDir = path.join(options.outputRoot, hostConfig.hostSubdir, 'skills', name);
-  const outputPath = path.join(outputDir, 'SKILL.md');
+  const outputDir = path.join(options.outputRoot, hostConfig.hostSubdir, 'skills', retired ? 'gstack-autoplan' : name);
+  const outputPath = path.join(outputDir, retired ? `${skillDir}.md` : 'SKILL.md');
 
   // Guard against symlink loops
   let symlinkLoop = false;
@@ -792,7 +791,7 @@ function processExternalHost(
 
   // Config-driven: generate metadata (e.g., openai.yaml for Codex). The
   // default_prompt comes from the template's codex_default_prompt: key when set.
-  const metadata = hostConfig.generation.generateMetadata && !symlinkLoop ? {
+  const metadata = hostConfig.generation.generateMetadata && !symlinkLoop && !retired ? {
     outputPath: path.join(outputDir, 'agents', 'openai.yaml'),
     content: generateOpenAIYaml(name, condenseOpenAIShortDescription(extractedDescription), extractCodexDefaultPrompt(tmplContent)),
   } : undefined;
@@ -851,7 +850,7 @@ function processTemplate(tmplPath: string, host: Host, options: RenderOptions): 
   // metadata gets the updated description with voice triggers included.
   const postProcessDescription = extractNameAndDescription(content).description;
 
-  // For Claude: strip sensitive: field (only Factory uses it)
+  // For Claude: strip template-only fields, add conditional fields
   // For external hosts: route output, transform frontmatter, rewrite paths
   let symlinkLoop = false;
   let metadata: { outputPath: string; content: string } | undefined;
@@ -886,7 +885,7 @@ function processTemplate(tmplPath: string, host: Host, options: RenderOptions): 
   if (skillDir === '' || skillDir === '.') content = omitDisabledSkills(content, [...options.disabledSkills, ...excludedSkillDirs(options.modules)]);
   content = rewriteInstallRoot(insertRuntimePreludes(rewriteCarvedSectionRefs(content, ctx), ctx), currentHostConfig, options.installRoot);
 
-  const preamble = hoistsPreamble(ctx) && tmplContent.includes('{{PREAMBLE}}') && !effectiveSuppressedResolvers(currentHostConfig, options).has('PREAMBLE')
+  const preamble = !(host !== 'claude' && RETIRED_SKILLS.includes(skillDir)) && hoistsPreamble(ctx) && tmplContent.includes('{{PREAMBLE}}') && !effectiveSuppressedResolvers(currentHostConfig, options).has('PREAMBLE')
     ? { outputPath: path.join(path.dirname(outputPath), 'sections', SHARED_PREAMBLE_FILE), content: renderSharedPreamble(ctx, currentHostConfig, options) }
     : undefined;
   return { outputPath, content, symlinkLoop, metadata, preamble };
@@ -989,7 +988,7 @@ export async function runGeneration(settings: GenerationOptions = {}): Promise<G
     model: settings.model ?? null,
     catalogMode: settings.catalogMode ?? 'trim',
     explainLevel: settings.explainLevel ?? 'default',
-    gbrainDetected: loadGbrainOverride(settings.respectDetection ?? false),
+    gbrainDetected: settings.gbrainDetected ?? loadGbrainOverride(settings.respectDetection ?? false),
     planMode: settings.planMode ?? true,
     modules: settings.modules ?? null,
   };

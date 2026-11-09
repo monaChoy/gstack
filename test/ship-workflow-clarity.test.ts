@@ -175,7 +175,7 @@ test('Step 18 resolves open PR state before preparing the title file Step 19 pos
   expectTokens(lookup, ['glab mr list --source-branch <branch-name> --output json'], 'ship Step 18');
   const title = compact(between(prTemplate, '### Prepare the title (Step 18)', '## Step 19:'));
   expectOrdered(title, ['{{FREE_TEXT_FILE:TITLE_FILE=pr-title}}', 'gstack-pr-title-rewrite.sh <new-version> --stdin > "$TITLE_FILE"'], 'ship Step 18 title');
-  expectTokens(title, ['`v<NEW_VERSION> <type>: <summary>`', '`v$NEW_VERSION `', "grep -Eq '^v<new-version>( |$)' \"$TITLE_FILE\""], 'ship Step 18 title');
+  expectTokens(title, ['`v<NEW_VERSION> <plain change>`', '`v$NEW_VERSION `', "grep -Eq '^v<new-version>( |$)' \"$TITLE_FILE\""], 'ship Step 18 title');
   expectAbsent(compact(entryTemplate + prTemplate), ['"<current title>"', 'NEW_TITLE'], 'ship Steps 18-19');
   expectTokens(prTemplate, ['--title-file "$TITLE_FILE"', 'exit 1', '**3**'], 'ship pr-body');
   const generated = readTemplate('ship/sections/pr-body.md');
@@ -194,7 +194,7 @@ test('linked spec discovery reads frontmatter fields and claims closure only for
 test('comment triage reports one of three statuses with fixed result strings', () => {
   const section = compact(readTemplate('ship/sections/greptile.md.tmpl'));
   expectTokens(section, ['"status":"complete|no_pr|unavailable"', '`complete`', '`no_pr`', '`unavailable`',
-    '"Greptile: no PR exists"', '"Greptile: fetched, zero comments"', '`Greptile triage: UNAVAILABLE (dispatch failed)`'], 'ship greptile section');
+    '"Review bots: not run (no PR, or both bot lists are none)"', '"Review bots: fetched, zero comments"', '`Review bot triage: UNAVAILABLE (dispatch failed)`'], 'ship greptile section');
   expectAbsent(section, ['If no PR exists, `gh` fails, the API errors, or there are zero comments'], 'ship greptile section');
 });
 

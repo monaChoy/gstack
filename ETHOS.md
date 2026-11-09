@@ -266,10 +266,63 @@ smaller than the variation is not a difference; say "no measurable change" and
 mean it. A surprising number is a lead to investigate, not a headline to post:
 the eval that jumps twenty points usually found a shortcut, not a capability.
 
+A write-up of what we learned is a gift to everyone building agents (Garry,
+2026-11-08: "this is a gift"), so it leads with what they can use. Every
+findings file, investigation write-up and results README opens with two or
+three plain bullets: the big takeaways, phrased as "We learned X. You should do
+X." What works comes first, with why it matters to a builder. What didn't work
+comes right after, stated plainly with its number, and a null becomes a useful
+lesson where the data supports one ("you don't need X; the plain model already
+does Y"). Our own mechanics (tracker codes, ledgers, receipts, gate details) go
+last. Every experiment names the public lesson it is after before it runs.
+Spend stays in the ledger and internal reports; a findings file shows cost
+only when it is part of the lesson, such as cost per correct answer between two
+setups. Private is the default: open a repo, dataset or tool only with a stated
+reason, helping builders or letting others reproduce a published finding. None
+of this bends the rules above: no number is rounded in our favour and no caveat
+is dropped.
+
 **Anti-patterns:**
 - A speedup from one run on each side.
 - A pass rate without the trial count.
 - "Faster" with no theory of what changed.
+- A results file whose lesson, or whose null, sits under a page of run ids.
+
+---
+
+## 9. Earn Its Place
+
+Garry, 2026-11-02:
+"Also work this principle of only include it if it is beneficial and good into gstack".
+
+Every skill, step, instruction, check and default costs tokens and attention
+on every run that loads it. So each one earns its place. A new part comes with
+evidence that it helps on frontier models, or with a stated reason, an owner
+and a date by which a fair test will measure it.
+
+A fair test runs Claude Code's own system prompt (the `claude_code` preset,
+not the Agent SDK's stub), on frontier models (today Opus 5.5 and GPT-6.1 Sol,
+plus at most one named low-cost model), against a no-gstack arm that is masked
+so it cannot read gstack. A result from the stub, from Haiku or Sonnet alone,
+or from an unmasked arm is a lead, not a verdict.
+
+When a fair test shows an existing part doesn't help, it gets one "Why null?"
+cycle: did the model use the part, did the task fit, was there enough power and
+room below the ceiling, and does today's model do the job without it. Then
+keep it, fix the method, or cut it, and say which plainly.
+
+Safety and security guards (careful, freeze, guard, unfreeze, cso) stay on
+their stated reason: they stop the rare bad run that an average score can't see.
+
+Measure the biggest parts first, the ones that load the most on the most runs.
+[docs/inventory.md](docs/inventory.md) ranks every part by load and shows its
+evidence; `docs/inventory/evidence.json` is the ledger, and
+`bin/gstack-inventory --check` validates it.
+
+**Anti-patterns:**
+- A new step because it sounds wise, with no test planned.
+- Keeping a part because it looked good on the stub or a small model.
+- Cutting a part after one null result, without the Why-null cycle.
 
 ---
 
@@ -282,6 +335,7 @@ Attack the Premise says: **when fixes keep failing, test the belief they share.*
 Separate Before Serializing says: **remove the race before you referee it.**
 Make Operations Idempotent says: **design for the run that happens twice.**
 Explain the Number says: **a result you cannot explain is not yet a result.**
+Earn Its Place says: **every part shows it helps, or has a dated plan to.**
 
 Together: search first, then build the complete version of the right thing.
 The worst outcome is building a complete version of something that already

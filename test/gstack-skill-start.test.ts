@@ -118,7 +118,8 @@ describe('gstack-skill-start contract', () => {
     // Worktree-isolated Claude Code sessions refuse a start command named by a
     // variable, a `[ -x ] ||` fallback, or a trailing `|| echo` (reproduced
     // with the pinned CLI). The Claude render is the literal install path;
-    // env-var hosts reach the script through $GSTACK_BIN. A missing helper is
+    // checked-in env-var host renders reach it through $GSTACK_ROOT/bin (an
+    // install-root render names the literal path, GST-882). A missing helper is
     // covered by the degraded-mode prose, not a shell fallback.
     const fence = (text: string) => {
       const at = text.search(/^## Preamble \((?:run first|after scope gate)\)/m);
@@ -130,7 +131,7 @@ describe('gstack-skill-start contract', () => {
     }
     for (const host of ['codex', 'gbrain']) {
       const lines = fence(generatePreamble({ skillName: 'ship', tmplPath: 'ship/SKILL.md.tmpl', host, paths: HOST_PATHS[host], preambleTier: 4 } as TemplateContext)).split('\n');
-      expect(lines.at(-1)).toMatch(/^"\$GSTACK_BIN\/gstack-skill-start" --skill "ship" --model "[^"]+"( --brain-health)?$/);
+      expect(lines.at(-1)).toMatch(/^"\$GSTACK_ROOT\/bin\/gstack-skill-start" --skill "ship" --model "[^"]+"( --brain-health)?$/);
       expect(lines.join('\n')).not.toMatch(/_SS|\$PPID|\|\| echo|\[ -x/);
     }
   });
@@ -412,7 +413,7 @@ describe('gstack-skill-start behavior', () => {
     expect(evalPlan).toContain('No helper writes a gate.json');
     expect(evalPlan).not.toContain('gate list');
     const ship = blocks.ship;
-    expect(ship).toContain('`GSTACK_RESULT: skill=ship status=complete run=<dir>`');
+    expect(ship).toContain('`GSTACK_RESULT: skill=ship status=complete head=<sha> run=<dir>`');
     expect(ship).toContain('`GSTACK_RESULT: skill=ship status=refused run=-`');
     expect(ship).not.toContain('writes no run directory');
     const records: Record<string, string> = {
@@ -432,11 +433,11 @@ describe('gstack-skill-start behavior', () => {
   }, 60_000);
 
   test('unattended /ship alone prints the UNATTENDED_SHIP status line naming the receipt file, the existing-PR body update and the result line (GSTA-88, rule 22)', () => {
-    const line = /^UNATTENDED_SHIP: no push, no new PR; an open PR at HEAD gets its body updated \(pr-body section, receipt first\), else Step 18 takes the handoff section; receipt at \.gstack\/tmp\/ship-receipt\.md; end with gstack-ship-receipt result$/gm;
+    const line = /^UNATTENDED_SHIP: no push, no new PR; an open PR at HEAD gets its body updated \(pr-body section, receipt in Agent notes\), else Step 18 takes the handoff section; receipt at \.gstack\/tmp\/ship-receipt\.md; end with gstack-ship-receipt result$/gm;
     const ship = runStart(['--skill', 'ship'], { GSTACK_SESSION_KIND: 'unattended' });
     expect(ship.match(line)).toHaveLength(1);
     expect((ship.match(/^GSTACK_INSTRUCTION_BEGIN: (\S+)/gm) ?? []).map((h) => h.replace(/^GSTACK_INSTRUCTION_BEGIN: /, ''))).toEqual(['unattended-session']);
-    expect(ship).toContain('`GSTACK_RESULT: skill=ship status=complete run=<dir>`');
+    expect(ship).toContain('`GSTACK_RESULT: skill=ship status=complete head=<sha> run=<dir>`');
     expect(ship).toContain("update that PR's body and title with the receipt through the pr-body section's existing-PR path (never pr-create, never a push, and never `gh pr ready`");
     expect(ship).toContain('the handoff section writes the receipt to .gstack/tmp/ship-receipt.md');
     for (const skill of ['review', 'qa', 'autoplan']) {

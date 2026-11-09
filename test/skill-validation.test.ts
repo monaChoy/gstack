@@ -10,6 +10,7 @@ import { expectMentions } from './helpers/prompt-structure';
 import { generateFailureRouting } from '../scripts/resolvers/preamble/generate-test-failure-triage';
 import { readShippedSkillRouting } from './helpers/shipped-skill-routing';
 import { readSkillStartup } from './helpers/skill-startup';
+import { RETIRED_SKILLS } from '../scripts/discover-skills';
 
 const ROOT = path.resolve(import.meta.dir, '..');
 
@@ -94,7 +95,7 @@ describe('SKILL.md command validation', () => {
     const md = fs.readFileSync(path.join(ROOT, 'SKILL.md'), 'utf-8');
     expect(md).not.toContain('gstack browse: QA Testing'); // browse body removed
     expect(md).toContain('## Route first'); // router head present
-    expect(md).toContain('invoke `/investigate`'); // routing rules present
+    expect(md).toContain('invoke `/qa`'); // routing rules present
     const result = validateSkill(path.join(ROOT, 'SKILL.md'));
     expect(result.invalid).toHaveLength(0); // no INVALID browse commands
     expect(result.valid.length).toBe(0); // and no browse commands at all — it routes, not browses
@@ -331,7 +332,7 @@ describe('Update check preamble', () => {
     'ship/SKILL.md', 'review/SKILL.md',
     'plan-ceo-review/SKILL.md', 'plan-eng-review/SKILL.md',
     'retro/SKILL.md',
-    'office-hours/SKILL.md', 'investigate/SKILL.md',
+    'office-hours/SKILL.md',
     'plan-design-review/SKILL.md',
     'design-review/SKILL.md',
     'design-consultation/SKILL.md',
@@ -430,7 +431,7 @@ describe('Update check preamble', () => {
 // --- Part 7: Cross-skill path consistency (A1) ---
 
 describe('Cross-skill path consistency', () => {
-  test('REMOTE_SLUG derivation pattern is identical across files that use it', () => {
+  test('no qa or review skill file hand-rolls a REMOTE_SLUG derivation (gstack-slug and gstack-review-bots own it)', () => {
     const patterns = extractRemoteSlugPatterns(ROOT, ['qa', 'review']);
     const allPatterns: string[] = [];
 
@@ -438,50 +439,30 @@ describe('Cross-skill path consistency', () => {
       allPatterns.push(...filePatterns);
     }
 
-    // Should find at least 2 occurrences (qa/SKILL.md + review/greptile-triage.md)
-    expect(allPatterns.length).toBeGreaterThanOrEqual(2);
+    // review/greptile-triage.md held the last prose copy until #3122 moved it into lib/review-bots.ts.
+    expect(allPatterns).toEqual([]);
+  });
 
-    // All occurrences must be character-for-character identical
-    const unique = new Set(allPatterns);
-    if (unique.size > 1) {
-      const variants = Array.from(unique);
-      throw new Error(
-        `REMOTE_SLUG pattern differs across files:\n` +
-        variants.map((v, i) => `  ${i + 1}: ${v}`).join('\n')
-      );
+  test('every review-bot history write goes through the one writer (project and global rows: test/review-bots.test.ts)', () => {
+    // ship's bot handling moved into sections/greptile.md (T9 carve).
+    for (const content of [fs.readFileSync(path.join(ROOT, 'review', 'SKILL.md'), 'utf-8'), readShipUnion()]) {
+      expect(content).toContain('History File Writes');
+      expect(content).not.toContain('greptile-history (type:');
     }
   });
 
-  test('all greptile-history write references specify both per-project and global paths', () => {
-    const filesToCheck = [
-      'review/SKILL.md',
-      'ship/SKILL.md',
-      'review/greptile-triage.md',
-    ];
-
-    for (const file of filesToCheck) {
-      const filePath = path.join(ROOT, file);
-      if (!fs.existsSync(filePath)) continue;
-      // ship's greptile handling moved into sections/greptile.md (T9 carve).
-      const content = file === 'ship/SKILL.md' ? readShipUnion() : fs.readFileSync(filePath, 'utf-8');
-
-      const hasBoth = (content.includes('per-project') && content.includes('global')) ||
-        (content.includes('$REMOTE_SLUG/greptile-history') && content.includes('~/.gstack/greptile-history'));
-
-      expect(hasBoth).toBe(true);
-    }
-  });
-
-  test('greptile-triage.md contains both project and global history paths', () => {
+  test('greptile-triage.md records through gstack-review-bots into review-bot-history.md', () => {
     const content = fs.readFileSync(path.join(ROOT, 'review', 'greptile-triage.md'), 'utf-8');
-    expect(content).toContain('$REMOTE_SLUG/greptile-history.md');
-    expect(content).toContain('~/.gstack/greptile-history.md');
+    expect(content).toContain('gstack-review-bots record --dir <bot-dir> --id <comment-id>');
+    expect(content).toContain('review-bot-history.md');
   });
 
-  test('retro/SKILL.md reads global greptile-history (not per-project)', () => {
+  test('retro/SKILL.md reads the global review-bot and greptile histories (not per-project)', () => {
     const content = fs.readFileSync(path.join(ROOT, 'retro', 'SKILL.md'), 'utf-8');
-    expect(content).toContain('the path `GREPTILE_HISTORY` printed');
-    expect(fs.readFileSync(path.join(ROOT, 'bin', 'gstack-retro-metrics'), 'utf-8')).toContain('$_GH/greptile-history.md');
+    expect(content).toContain('`REVIEW_BOT_HISTORY` / `GREPTILE_HISTORY: present`');
+    const metrics = fs.readFileSync(path.join(ROOT, 'bin', 'gstack-retro-metrics'), 'utf-8');
+    expect(metrics).toContain('$_GH/greptile-history.md');
+    expect(metrics).toContain('$_GH/review-bot-history.md');
     // Should NOT reference per-project path for reads
     expect(content).not.toContain('$REMOTE_SLUG/greptile-history.md');
   });
@@ -703,7 +684,7 @@ describe('v0.4.1 preamble features', () => {
     'ship/SKILL.md', 'review/SKILL.md',
     'plan-ceo-review/SKILL.md', 'plan-eng-review/SKILL.md',
     'retro/SKILL.md',
-    'office-hours/SKILL.md', 'investigate/SKILL.md',
+    'office-hours/SKILL.md',
     'plan-design-review/SKILL.md',
     'design-review/SKILL.md',
     'design-consultation/SKILL.md',
@@ -907,14 +888,6 @@ describe('office-hours skill structure', () => {
   test('contains rough aesthetic instruction', () => {
     expect(content).toMatch(/rough|hand-drawn/i);
   });
-});
-
-describe('investigate skill structure', () => {
-  const content = fs.readFileSync(path.join(ROOT, 'investigate', 'SKILL.md'), 'utf-8');
-  for (const section of ['Iron Law', 'Root Cause', 'Pattern Analysis', 'Hypothesis',
-                          'DEBUG REPORT', '3-strike', 'BLOCKED']) {
-    test(`contains ${section}`, () => expect(content).toContain(section));
-  }
 });
 
 // Contributor mode was removed in v0.13.10.0 — replaced by operational self-improvement.
@@ -1704,7 +1677,9 @@ describe('Codex skill', () => {
     //
     //   scoped   — `codex review --base <base>` with NO prompt argument. The
     //     scope comes from the CLI, which is the only thing that actually sets
-    //     it. This is what all three files now use.
+    //     it. Every site has since moved to `codex exec` with the diff written into
+    //     the prompt, because `codex review --base` cannot be asked for the
+    //     verdict line the gate reads; no rendered `codex review` call remains.
     //   broken   — prompt-only `codex review "<text>"` describing the diff
     //     range in prose. This parses, but the CLI falls back to *uncommitted
     //     working-tree* scope, so the review silently covers the wrong changes.
@@ -1718,7 +1693,8 @@ describe('Codex skill', () => {
       const content = rel === 'ship/SKILL.md' ? readShipUnion()
         : rel === 'review/SKILL.md' ? readSkillUnion('review')
         : readSkillUnion('codex');
-      expect(content).toMatch(/codex\s+review\s+--base\b/);
+      expect(content).toMatch(/codex\s+exec\s+-\s/);
+      expect(content).toContain('git merge-base <base> HEAD');
       const offending: string[] = [];
       for (const line of content.split('\n')) {
         if (line.includes('`codex review`')) continue;
@@ -1776,7 +1752,7 @@ describe('Skill trigger phrases', () => {
   // Excluded: root gstack (browser tool), gstack-upgrade (gstack-specific),
   // humanizer (text tool)
   const SKILLS_REQUIRING_TRIGGERS = [
-    'qa', 'qa-only', 'ship', 'review', 'investigate', 'office-hours',
+    'qa', 'qa-only', 'ship', 'review', 'office-hours',
     'plan-ceo-review', 'plan-eng-review', 'plan-design-review',
     'design-review', 'design-consultation', 'retro', 'document-release',
     'codex', 'browse', 'setup-browser-cookies', 'scrape',
@@ -1893,6 +1869,7 @@ describe('Doc inventory cross-check', () => {
       if (!entry.isDirectory()) continue;
       if (entry.name.startsWith('.')) continue;
       if (DOC_INVENTORY_EXCLUDE.has(entry.name)) continue;
+      if (RETIRED_SKILLS.includes(entry.name)) continue;
       const tmplPath = path.join(ROOT, entry.name, 'SKILL.md.tmpl');
       if (fs.existsSync(tmplPath)) dirs.push(entry.name);
     }
@@ -1936,6 +1913,7 @@ describe('Codex skill validation', () => {
       if (!entry.isDirectory() || entry.name.startsWith('.') || entry.name === 'node_modules') continue;
       if (entry.name === 'codex') continue; // Unavailable on Codex
       if (entry.name === 'claude-code') continue; // Unavailable on Claude Code
+      if (RETIRED_SKILLS.includes(entry.name)) continue;
       if (fs.existsSync(path.join(ROOT, entry.name, 'SKILL.md.tmpl'))) {
         skills.push(entry.name);
       }
@@ -2057,30 +2035,33 @@ describe('Failure routing: verified cause → fix, unknown cause → bounded tri
   const rule = generateFailureRouting();
   const unknownCause = rule.slice(rule.indexOf('**Cause unknown:** ') + '**Cause unknown:** '.length);
 
-  test('the router sends bug reports through the failure rule, not straight to /investigate', () => {
+  test('the router sends bug reports through the failure rule and names no retired skill (GST-1717)', () => {
     const router = fs.readFileSync(path.join(ROOT, 'SKILL.md'), 'utf-8');
     expect(router).toContain(rule);
     const bugRule = router.split('\n').find(line => line.startsWith('- User reports a bug'));
     expect(bugRule).toContain('**Failures**');
-    expect(bugRule).not.toMatch(/→ invoke `\/investigate`$/);
+    expect(bugRule).toContain('then fix it test-first');
+    expect(router).not.toContain('/investigate');
   });
 
-  test('the rule keeps the root-cause bar on both paths', () => {
-    expect(rule).toMatch(/\*\*Cause supplied\*\*[^\n]*one read-only check[^\n]*If it does not, invoke `\/investigate` before any further tracing or edit/);
-    expect(unknownCause).toMatch(/^make one read-only triage pass[^\n]*Do not reproduce, test hypotheses or search wider[^\n]*still unclear, invoke `\/investigate` before any broader diagnosis or edit\.$/);
+  test('the rule keeps the root-cause bar on both paths, with a focused failing test when the cause is unclear', () => {
+    expect(rule).toMatch(/\*\*Cause supplied\*\*[^\n]*one read-only check[^\n]*If it does not, leave the suggested fix alone: reproduce the failure with a focused failing test, trace it to the root cause/);
+    expect(unknownCause).toMatch(/^make one read-only triage pass[^\n]*Do not reproduce, test hypotheses or search wider[^\n]*still unclear, write or run a focused test that fails on the bug before any edit, trace the failure to its root cause/);
+    expect(rule).not.toContain('/investigate');
   });
 
-  test('the routing gstack offers for CLAUDE.md, and this repo\'s own, check the cause before /investigate', () => {
-    const bugRule = readShippedSkillRouting().rules.find(line => line.startsWith('- Bugs/errors'));
-    expect(bugRule).toMatch(/→ invoke \/investigate, unless one read-only check confirms the cause/);
+  test('the routing gstack offers for CLAUDE.md, and this repo\'s own, fix bugs directly behind a cause check or a failing test', () => {
+    const bugRule = readShippedSkillRouting().section.split('\n').find(line => line.startsWith('- Bugs/errors'));
+    expect(bugRule).toMatch(/→ fix them directly: one read-only check of the cause, or a focused failing test first when the cause is unclear/);
+    expect(bugRule).not.toContain('/investigate');
     expect(fs.readFileSync(path.join(ROOT, 'CLAUDE.md'), 'utf-8').split('\n')).toContain(bugRule!);
   });
 
   test('/ship fixes a pre-existing failure through the same bounded triage', () => {
     const tests = fs.readFileSync(path.join(ROOT, 'ship', 'sections', 'tests.md'), 'utf-8');
     const fixNow = tests.slice(tests.indexOf('**If "Investigate and fix now":**'), tests.indexOf('**If "Add as P0 TODO":**'));
-    expect(fixNow).toContain('- One read-only root-cause pass, then `/investigate` if unclear.');
-    expect(fixNow).not.toContain('/investigate mindset');
+    expect(fixNow).toContain('- One read-only root-cause pass. If the cause is still unclear, reproduce it with a focused failing test and trace it to the root cause before the fix.');
+    expect(fixNow).not.toContain('/investigate');
   });
 });
 

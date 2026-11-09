@@ -32,14 +32,15 @@ describe('/modernize skill', () => {
     expect(flat).toContain('The disposition comes first. No rebase is pushed, and no PR is closed, until the verdict below is written and shown.');
     expect(skill.indexOf('## Step 3: The disposition')).toBeLessThan(skill.indexOf('## Step 4 (MODERNIZE only)'));
     expect(skill.indexOf('## Step 4 (MODERNIZE only)')).toBeLessThan(skill.indexOf('## Step 5 (MODERNIZE only)'));
-    expect(flat).toContain('STOP and ask (AskUserQuestion) before any push or any closing comment');
-    expect(flat).toContain('If the session is unattended, the verdict and its evidence are the handoff and nothing is pushed.');
+    expect(flat).toContain('STOP and ask (AskUserQuestion) before any push, close or comment.');
+    expect(flat).toContain('If the session is unattended, the verdict and its evidence are the handoff and nothing is pushed, closed or posted.');
   });
 
   test('never closes a PR on its own', () => {
     expect(flat).toContain('You never close a PR.');
     expect(flat).toContain('Without explicit permission in this session, the PR stays open.');
     expect(flat).toContain('The PR stays open until someone with the authority says so.');
+    expect(flat).toContain('A comment you post on the PR (a closing note, a thank-you to its author) goes under your bot identity (`capy-ai[bot]` on Capy), never the maintainer\'s own account; with no bot identity, it is a draft in your report for the person to post. On Capy, post through `tools.pr.comment` (it posts as `capy-ai[bot]`), never `gh pr comment`, `gh issue comment` or `gh api`, which run as the maintainer.');
     expect(skill).not.toMatch(/gh pr close/);
   });
 
@@ -69,7 +70,7 @@ describe('/modernize skill', () => {
     expect(read('AGENTS.md')).toMatch(/^\| `\/modernize` \| /m);
     expect(read('docs/skills.md')).toMatch(/^\| \[`\/modernize`\]\(#modernize\) \| /m);
     expect(read('docs/skills.md')).toContain('## `/modernize`');
-    expect(read('SKILL.md.tmpl')).toContain('invoke `/modernize`');
+    expect(read('SKILL.md.tmpl')).toContain('type `/modernize`');
     expect(read('gstack/llms.txt')).toContain('[/modernize](modernize/SKILL.md)');
     expect(read('docs/PROJECT_STRUCTURE.md')).toMatch(/^├── modernize\//m);
     expect(read('lib/doctor-components.ts')).toMatch(/^  modernize: CLAUDE_ONLY,$/m);

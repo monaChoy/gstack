@@ -6,7 +6,7 @@
  * requires-remote. Every assertion holds on any host platform: each lane the
  * fixture selects is either named in `local` or asserted only by label.
  */
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterAll, afterEach, describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -15,18 +15,20 @@ import { EXIT } from '../lib/headless-artifacts';
 import { loadConfigFromUser, validateConfig } from '../lib/pregate/config';
 import { buildContext, sha256, userConfigRejection } from '../lib/pregate/context';
 import { runPregate, verifyPregate } from '../lib/pregate/index';
-import { BASE_PREGATE, BIN, cleanup, commit, makeFixtureRepo, runBin, type FixtureRepo } from './helpers/pregate-fixture';
+import { BASE_PREGATE, BIN, cleanup, cloneFixture, commit, fixtureTemplate, makeFixtureRepo, runBin, type FixtureRepo } from './helpers/pregate-fixture';
 import { runScriptSync } from '../lib/script-invocation';
 
 const repos: FixtureRepo[] = [];
 afterEach(() => { while (repos.length) cleanup(repos.pop()!); });
+const noBasePolicy = fixtureTemplate({ pregate: null });
+afterAll(() => noBasePolicy.dispose());
 
 const SLUG = 'userpolicy';
 const LOCAL_ALL = ['free-tests.yml/unit', 'windows.yml/windows-shard'];
 
 /** A fixture whose base carries no `.gstack/pregate.json`, a feature commit touching lib/util.js, and the user-file path for its slug. */
 function setup(): { repo: FixtureRepo; userPolicy: string; run: (extra?: string[]) => ReturnType<typeof runBin> } {
-  const repo = makeFixtureRepo({ pregate: null });
+  const repo = cloneFixture(noBasePolicy);
   repos.push(repo);
   commit(repo, { 'lib/util.js': 'exports.add = (a, b) => b + a;\n' });
   const userPolicy = path.join(repo.home, 'projects', SLUG, 'pregate.json');
@@ -86,6 +88,23 @@ describe('loadConfigFromUser', () => {
     expect(bad && 'errors' in bad ? bad.errors.map(e => e.message.startsWith('not valid JSON')) : null).toEqual([true]);
     // The JSON error names this file, not the repo copy parseConfig assumes.
     expect(bad && 'errors' in bad ? bad.errors.map(e => e.path) : null).toEqual([userPolicy]);
+  });
+});
+
+describe('fixture origin', () => {
+  // Value: protects=a push into the fixture's bare origin starts no detached auto-maintenance there, so copying the template never races
+  //   a repack (ENOENT lstat origin.git/objects/1d, Free Tests 41760556132); fails_when=the origin loses maintenance.auto=false;
+  //   why_new=local transport drops the runner's GIT_CONFIG_COUNT backstop, so only the origin's own config reaches receive-pack;
+  //   seam=none; no_claim=which maintenance task removed the object directory on the CI runner's git
+  test('a push into the origin starts no auto-maintenance even when the runner backstop is dropped', () => {
+    const { repo } = setup();
+    const trace = path.join(repo.root, 'trace2.txt');
+    const backstop = { GIT_CONFIG_COUNT: '2', GIT_CONFIG_KEY_0: 'maintenance.auto', GIT_CONFIG_VALUE_0: 'false', GIT_CONFIG_KEY_1: 'gc.auto', GIT_CONFIG_VALUE_1: '0' };
+    const push = spawnSync('git', ['push', '-q', 'origin', 'HEAD:refs/heads/probe'], { cwd: repo.work, encoding: 'utf8', timeout: 30_000, env: { ...process.env, ...repo.env, ...backstop, GIT_TRACE2: trace } });
+    expect(push.status, push.stderr).toBe(0);
+    const events = fs.readFileSync(trace, 'utf8');
+    expect(events).toContain('receive-pack');
+    expect(events.split('\n').filter(l => l.includes('child_start') && l.includes('maintenance'))).toEqual([]);
   });
 });
 

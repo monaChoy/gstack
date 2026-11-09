@@ -15,6 +15,10 @@ import { CAPY_RESULT_CODES } from './result-codes-capy';
 import { BUDGET_RESULT_CODES } from './result-codes-budget';
 import { EVAL_RESULT_CODES } from './result-codes-eval';
 import { PLAN_RESULT_CODES } from './result-codes-plan';
+import { AUTOPLAN_RESULT_CODES } from './result-codes-autoplan';
+import { BROWSE_RESULT_CODES } from './result-codes-browse';
+import { CLEAN_RESULT_CODES } from './result-codes-clean';
+import { PLAIN_RESULT_CODES } from './result-codes-plain';
 
 export interface ResultCode {
   /** Stable `<a id>` in docs/troubleshooting.md. */
@@ -407,8 +411,8 @@ export const RESULT_CODES = {
   },
   PREGATE_STALLED: {
     anchor: 'pregate-stalled',
-    summary: 'a test command printed nothing for the stall timeout, so its process group was killed; the check is incomplete, never pass',
-    fix: 'read the lane log for the last file started, fix the hang, or raise `--stall-timeout` (`stall_timeout_s`; 0 disables) for a test that is quiet for longer, then rerun `gstack-pregate --stage tests`',
+    summary: 'a test command printed nothing for the stall timeout while its process group used under a tenth of one CPU (log growth alone on Windows), so the group was killed; the check is incomplete, never pass',
+    fix: 'read the lane log for the last file started, fix the hang, or raise `--stall-timeout` (`stall_timeout_s`; 0 disables) for a test that waits quietly for longer, then rerun `gstack-pregate --stage tests`',
   },
   PREGATE_RECEIPT_INVALID: {
     anchor: 'pregate-receipt-invalid',
@@ -554,7 +558,7 @@ export const RESULT_CODES = {
   },
   GATE_REC_STALE: {
     anchor: 'gate-rec-stale',
-    summary: 'a `rec` reply was rendered before `gstack-autoplan recommend` changed the recommendations it takes, or the gate predates `rec` (a gate.json without rec_rev, rendered when `all` left changes pending)',
+    summary: 'a `rec` reply was rendered before `gstack-autoplan recommend` changed the recommendations it takes, its `--rec-hash` came from another run\'s gate, or the gate predates `rec` (a gate.json without rec_rev, rendered when `all` left changes pending)',
     fix: 'render the gate again (`gstack-gate render <dir>/gate.json --all`), relay it, and answer with the printed `--rec-hash`',
   },
   CHECKPOINT_INVALID: {
@@ -600,7 +604,7 @@ export const RESULT_CODES = {
   },
   UPGRADE_BUSY: {
     anchor: 'upgrade-busy',
-    summary: 'bin/gstack-upgrade changed nothing: another live session holds a workflow lease on this installation (bin/gstack-lease live), or, at a Capy install, the caller\'s own run does, or a shared harness (capy-server) whose lease may be a sibling session\'s is under 120 minutes old, so moving the checkout would change gstack under it',
+    summary: 'bin/gstack-upgrade changed nothing: another live session holds a workflow lease on this installation (bin/gstack-lease live), or, at a Capy install, the caller\'s own run does, or a shared harness (capy-server) whose lease may be a sibling session\'s is under 120 minutes old, or a live eval run holds gstack-detach\'s ~/.gstack/locks/gstack-evals.lock, so moving the checkout would change gstack under it',
     fix: 'wait for those sessions to finish, or for a shared-harness lease to turn 120 minutes old (bin/gstack-lease list names each pid and age), then re-run bin/gstack-upgrade; GSTACK_UPGRADE_FORCE=1 overrides when you know no other session uses the checkout',
   },
   UPGRADE_FETCH_FAILED: {
@@ -632,12 +636,6 @@ export const RESULT_CODES = {
     anchor: 'install-unverified',
     summary: 'a Capy session (GSTACK_CAPY=1) has no passing install verdict for this checkout, HEAD and workflow, so the workflow refused to start',
     fix: 'run the Capy skill installer with --for <workflow> on this machine and launch with the GSTACK_LAUNCH line it prints',
-  },
-  // Fix wave 2026-10-15, PR 1a (items 7 and 11).
-  BROWSE_TAB_UNRECOVERABLE: {
-    anchor: 'browse-tab-unrecoverable',
-    summary: 'every tab was closed outside browse and a new one could not be opened, because the browser or its context is gone',
-    fix: 'run `browse restart` (`$B restart` in a gstack skill); `browse status` and `browse stop` keep working',
   },
   BUN_VERSION_UNREADABLE: {
     anchor: 'bun-version-unreadable',
@@ -770,6 +768,10 @@ export const RESULT_CODES = {
   ...BUDGET_RESULT_CODES,
   ...EVAL_RESULT_CODES,
   ...PLAN_RESULT_CODES,
+  ...AUTOPLAN_RESULT_CODES,
+  ...BROWSE_RESULT_CODES,
+  ...CLEAN_RESULT_CODES,
+  ...PLAIN_RESULT_CODES,
 } as const satisfies Record<string, ResultCode>;
 
 export type ResultCodeName = keyof typeof RESULT_CODES;

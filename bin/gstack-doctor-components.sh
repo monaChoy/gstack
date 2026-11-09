@@ -8,7 +8,7 @@ GSTACK_DOCTOR_COMPONENTS="claude codex patch codex-cli browse-bundle browser cso
 GSTACK_DOCTOR_CORE="runtime pins state-root privacy cores revision floor wrapper"
 GSTACK_DOCTOR_HOSTS="claude codex"
 GSTACK_DOCTOR_OPTIONAL="codex-cli cso"
-GSTACK_DOCTOR_SKILLS="autoplan plan-ceo-review plan-eng-review plan-design-review plan-devex-review plan-tune office-hours spec review ship investigate codex cso browse qa qa-only design-review design-consultation design-html design-motion devex-review scrape skillify canary benchmark make-pdf diagram pair-agent open-gstack-browser setup-browser-cookies connect-chrome land-and-deploy benchmark-models captain careful claude-code context-restore context-save design-shotgun deslop-shared-libs document-generate document-release eval-plan freeze gstack-upgrade guard health ios-clean ios-design-review ios-fix ios-qa ios-sync landing-report learn write-skill modernize retro setup-deploy setup-gbrain sync-gbrain test-audit ubicloud unfreeze verify review-voice"
+GSTACK_DOCTOR_SKILLS="autoplan plan-ceo-review plan-design-review plan-devex-review plan-tune office-hours spec review ship codex cso browse qa qa-only design-review design-consultation design-html design-motion devex-review scrape skillify canary benchmark make-pdf diagram pair-agent open-gstack-browser setup-browser-cookies connect-chrome land-and-deploy benchmark-models captain careful claude-code context-restore context-save design-shotgun deslop-shared-libs document-generate document-release eval-plan freeze gstack-upgrade guard health ios-clean ios-design-review ios-fix ios-qa ios-sync landing-report learn write-skill modernize retro runaway-stopper setup-deploy setup-gbrain sync-gbrain test-audit ubicloud unfreeze verify review-voice"
 GSTACK_BROWSER_LAZY_REASON="lazy; gstack-browser-ensure installs on first use"
 GSTACK_DOCTOR_HELPERS="gstack-pregate gstack-plan-reality gstack-artifact gstack-autoplan"
 GSTACK_DOCTOR_NOT_NEEDED="none"
@@ -65,11 +65,11 @@ gstack_doctor_component_kind() {
 # gstack_doctor_skill_requires SKILL — the non-core ids the skill needs; returns 1 for an unknown skill.
 gstack_doctor_skill_requires() {
   case "$1" in
-    autoplan|plan-ceo-review|plan-eng-review|plan-design-review|plan-devex-review|plan-tune|office-hours|spec|review|ship|investigate) printf '%s' 'claude codex patch' ;;
+    autoplan|plan-ceo-review|plan-design-review|plan-devex-review|plan-tune|office-hours|spec|review|ship) printf '%s' 'claude codex patch' ;;
     codex) printf '%s' 'claude codex patch codex-cli' ;;
     cso) printf '%s' 'claude cso' ;;
     browse|qa|qa-only|design-review|design-consultation|design-html|design-motion|devex-review|scrape|skillify|canary|benchmark|make-pdf|diagram|pair-agent|open-gstack-browser|setup-browser-cookies|connect-chrome|land-and-deploy) printf '%s' 'claude codex patch browse-bundle browser' ;;
-    benchmark-models|captain|careful|claude-code|context-restore|context-save|design-shotgun|deslop-shared-libs|document-generate|document-release|eval-plan|freeze|gstack-upgrade|guard|health|ios-clean|ios-design-review|ios-fix|ios-qa|ios-sync|landing-report|learn|write-skill|modernize|retro|setup-deploy|setup-gbrain|sync-gbrain|test-audit|ubicloud|unfreeze|verify) printf '%s' 'claude' ;;
+    benchmark-models|captain|careful|claude-code|context-restore|context-save|design-shotgun|deslop-shared-libs|document-generate|document-release|eval-plan|freeze|gstack-upgrade|guard|health|ios-clean|ios-design-review|ios-fix|ios-qa|ios-sync|landing-report|learn|write-skill|modernize|retro|runaway-stopper|setup-deploy|setup-gbrain|sync-gbrain|test-audit|ubicloud|unfreeze|verify) printf '%s' 'claude' ;;
     review-voice) printf '%s' 'helpers' ;;
     *) return 1 ;;
   esac
@@ -78,11 +78,11 @@ gstack_doctor_skill_requires() {
 # gstack_doctor_skill_optional SKILL — ids that SKIP when absent; returns 1 for an unknown skill.
 gstack_doctor_skill_optional() {
   case "$1" in
-    autoplan|plan-ceo-review|plan-eng-review|plan-design-review|plan-devex-review|plan-tune|office-hours|spec|review|ship|investigate) printf '%s' 'codex-cli' ;;
+    autoplan|plan-ceo-review|plan-design-review|plan-devex-review|plan-tune|office-hours|spec|review|ship) printf '%s' 'codex-cli' ;;
     codex) printf '%s' '' ;;
     cso) printf '%s' '' ;;
     browse|qa|qa-only|design-review|design-consultation|design-html|design-motion|devex-review|scrape|skillify|canary|benchmark|make-pdf|diagram|pair-agent|open-gstack-browser|setup-browser-cookies|connect-chrome|land-and-deploy) printf '%s' 'codex-cli' ;;
-    benchmark-models|captain|careful|claude-code|context-restore|context-save|design-shotgun|deslop-shared-libs|document-generate|document-release|eval-plan|freeze|gstack-upgrade|guard|health|ios-clean|ios-design-review|ios-fix|ios-qa|ios-sync|landing-report|learn|write-skill|modernize|retro|setup-deploy|setup-gbrain|sync-gbrain|test-audit|ubicloud|unfreeze|verify) printf '%s' '' ;;
+    benchmark-models|captain|careful|claude-code|context-restore|context-save|design-shotgun|deslop-shared-libs|document-generate|document-release|eval-plan|freeze|gstack-upgrade|guard|health|ios-clean|ios-design-review|ios-fix|ios-qa|ios-sync|landing-report|learn|write-skill|modernize|retro|runaway-stopper|setup-deploy|setup-gbrain|sync-gbrain|test-audit|ubicloud|unfreeze|verify) printf '%s' '' ;;
     review-voice) printf '%s' '' ;;
     *) return 1 ;;
   esac
@@ -91,7 +91,7 @@ gstack_doctor_skill_optional() {
 # gstack_doctor_skill_pins_advisory SKILL — true for a planning-only workflow (a repo test-pin mismatch SKIPs pins).
 gstack_doctor_skill_pins_advisory() {
   case "$1" in
-    autoplan|plan-ceo-review|plan-eng-review|plan-design-review|plan-devex-review|office-hours) return 0 ;;
+    autoplan|plan-ceo-review|plan-design-review|plan-devex-review|office-hours) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -233,7 +233,6 @@ gstack_result_anchor() {
     BUN_RESOLUTION_DRIFT) printf '%s' 'bun-resolution-drift' ;;
     BUN_INSTALL_VERSION_INVALID) printf '%s' 'bun-install-version-invalid' ;;
     INSTALL_UNVERIFIED) printf '%s' 'install-unverified' ;;
-    BROWSE_TAB_UNRECOVERABLE) printf '%s' 'browse-tab-unrecoverable' ;;
     BUN_VERSION_UNREADABLE) printf '%s' 'bun-version-unreadable' ;;
     BASH_UNAVAILABLE) printf '%s' 'bash-unavailable' ;;
     IOS_LAUNCH_ENV_INVALID) printf '%s' 'ios-launch-env-invalid' ;;
@@ -259,6 +258,9 @@ gstack_result_anchor() {
     DX_CAPTURE_REDACTION_FAILED) printf '%s' 'dx-capture-redaction-failed' ;;
     DX_CAPTURE_INTERNAL) printf '%s' 'dx-capture-internal' ;;
     POLICY_GSTACK_TOO_OLD) printf '%s' 'policy-gstack-too-old' ;;
+    POLICY_FLOOR_ABOVE_STABLE) printf '%s' 'policy-floor-above-stable' ;;
+    STABLE_RELEASE_UNKNOWN) printf '%s' 'stable-release-unknown' ;;
+    PREGATE_GSTACK_TOO_OLD) printf '%s' 'pregate-gstack-too-old' ;;
     QUEUE_NOT_READY) printf '%s' 'queue-not-ready' ;;
     QUEUE_PROOF_MISSING) printf '%s' 'queue-proof-missing' ;;
     QUEUE_STAMP_NOT_STAMP_ONLY) printf '%s' 'queue-stamp-not-stamp-only' ;;
@@ -306,8 +308,10 @@ gstack_result_anchor() {
     BASE_RED_REPRO_ERROR) printf '%s' 'base-red-repro-error' ;;
     BASE_RED_PAUSE_EXPIRED) printf '%s' 'base-red-pause-expired' ;;
     BASE_RED_WAIT_TIMEOUT) printf '%s' 'base-red-wait-timeout' ;;
+    BASE_CONTAINS_HEAD) printf '%s' 'base-contains-head' ;;
     QUEUE_RECEIPT_DEPTH_RAISED) printf '%s' 'queue-receipt-depth-raised' ;;
     QUEUE_RECEIPT_EXCEPTION_INVALID) printf '%s' 'queue-receipt-exception-invalid' ;;
+    QUEUE_RECEIPT_TARGETED_MISSING) printf '%s' 'queue-receipt-targeted-missing' ;;
     QUEUE_SCREEN_STALE_REF) printf '%s' 'queue-screen-stale-ref' ;;
     QUEUE_SCREEN_NOT_RUN) printf '%s' 'queue-screen-not-run' ;;
     QUEUE_TRAIN_STACK_RED) printf '%s' 'queue-train-stack-red' ;;
@@ -326,6 +330,7 @@ gstack_result_anchor() {
     REGEN_DEPS_MISSING) printf '%s' 'regen-deps-missing' ;;
     REVIEW_SCOPE_INPUT) printf '%s' 'review-scope-input' ;;
     REVIEW_SCOPE_RANGE) printf '%s' 'review-scope-range' ;;
+    REVIEW_SCOPE_LEDGER) printf '%s' 'review-scope-ledger' ;;
     RECEIPT_CARRY_REFUSED) printf '%s' 'receipt-carry-refused' ;;
     PROSE_LINT_FOUND) printf '%s' 'prose-lint-found' ;;
     REVIEW_LOOP_EXCEPTION_INVALID) printf '%s' 'review-loop-exception-invalid' ;;
@@ -333,17 +338,36 @@ gstack_result_anchor() {
     RECEIPT_CARRY_PRODUCT_CHANGED) printf '%s' 'receipt-carry-product-changed' ;;
     RECEIPT_CARRY_SCOPED_REVIEW) printf '%s' 'receipt-carry-scoped-review' ;;
     DOCS_AUDIT_BLOCKED) printf '%s' 'docs-audit-blocked' ;;
+    DOCS_RESULT_INVALID) printf '%s' 'docs-result-invalid' ;;
     RECEIPT_PROSE_MISMATCH) printf '%s' 'receipt-prose-mismatch' ;;
     RECEIPT_CARRY_PREGATE_STALE) printf '%s' 'receipt-carry-pregate-stale' ;;
     RECEIPT_GIT_TOO_OLD) printf '%s' 'receipt-git-too-old' ;;
     CHANGELOG_FRAGMENT_INVALID) printf '%s' 'changelog-fragment-invalid' ;;
     QUEUE_LAND_LOCKED) printf '%s' 'queue-land-locked' ;;
+    QUEUE_TRAIN_UNSTAMPED) printf '%s' 'queue-train-unstamped' ;;
+    RESTAMP_NOT_STAGED) printf '%s' 'restamp-not-staged' ;;
+    RESTAMP_UNSTAGED_EDITS) printf '%s' 'restamp-unstaged-edits' ;;
     QUEUE_LAND_CONFLICT) printf '%s' 'queue-land-conflict' ;;
     QUEUE_LAND_DRIFT) printf '%s' 'queue-land-drift' ;;
     QUEUE_LAND_BASE_BUSY) printf '%s' 'queue-land-base-busy' ;;
+    QUEUE_LAND_STAMPED) printf '%s' 'queue-land-stamped' ;;
+    QUEUE_LAND_PIN_MOVED) printf '%s' 'queue-land-pin-moved' ;;
+    QUEUE_LAND_CHECKS) printf '%s' 'queue-land-checks' ;;
+    QUEUE_LAND_MERGED_CHECKS) printf '%s' 'queue-land-merged-checks' ;;
+    QUEUE_LAND_NOT_CLEAN) printf '%s' 'queue-land-not-clean' ;;
+    QUEUE_LAND_UNVERIFIED) printf '%s' 'queue-land-unverified' ;;
+    RELEASE_STAMP_EMPTY) printf '%s' 'release-stamp-empty' ;;
+    RELEASE_STAMP_INVALID) printf '%s' 'release-stamp-invalid' ;;
     PR_WAIT_BLOCKED) printf '%s' 'pr-wait-blocked' ;;
     PR_WAIT_REFUSED) printf '%s' 'pr-wait-refused' ;;
     PREGATE_HEAD_POLICY_LOOSENS) printf '%s' 'pregate-head-policy-loosens' ;;
+    REVIEW_DIFF_TOO_LARGE) printf '%s' 'review-diff-too-large' ;;
+    REVIEW_DIFF_UNREADABLE) printf '%s' 'review-diff-unreadable' ;;
+    REVIEW_PLAN_STOPPED) printf '%s' 'review-plan-stopped' ;;
+    REVIEW_EXCLUDE_REFERENCE) printf '%s' 'review-exclude-reference' ;;
+    FETCH_VIOLATION) printf '%s' 'fetch-violation' ;;
+    FETCH_RERUN_BLOCKED) printf '%s' 'fetch-rerun-blocked' ;;
+    FETCH_RERUN_SPENT) printf '%s' 'fetch-rerun-spent' ;;
     APPROVAL_RECORD_INVALID) printf '%s' 'approval-record-invalid' ;;
     APPROVAL_RECORD_SECRET) printf '%s' 'approval-record-secret' ;;
     APPROVAL_RECORD_NO_BRANCH) printf '%s' 'approval-record-no-branch' ;;
@@ -358,7 +382,14 @@ gstack_result_anchor() {
     LAUNCH_FILE_UNWRITABLE) printf '%s' 'capy-install-launch-file-unwritable' ;;
     PROJECT_FLOOR_UNMET) printf '%s' 'project-floor-unmet' ;;
     PROJECT_NODE_PIN_UNMET) printf '%s' 'project-node-pin-unmet' ;;
+    PIN_UNREASONED) printf '%s' 'pin-unreasoned' ;;
     UPGRADE_SKIPPED) printf '%s' 'upgrade-skipped' ;;
+    PLAN_RECORD_MISSING) printf '%s' 'plan-record-missing' ;;
+    PLAN_UNRESOLVED) printf '%s' 'plan-unresolved' ;;
+    PLAN_NOT_APPROVED) printf '%s' 'plan-not-approved' ;;
+    PLAN_EXEMPT_UNKNOWN) printf '%s' 'plan-exempt-unknown' ;;
+    PLAN_STORE_UNAVAILABLE) printf '%s' 'plan-store-unavailable' ;;
+    QUEUE_PLAN_MISMATCH) printf '%s' 'queue-plan-mismatch' ;;
     BUDGET_CAP_REACHED) printf '%s' 'budget-cap-reached' ;;
     BUDGET_READING_MISSING) printf '%s' 'budget-reading-missing' ;;
     METER_SCOPE_PARENT) printf '%s' 'meter-scope-parent' ;;
@@ -375,6 +406,29 @@ gstack_result_anchor() {
     OFFICE_HOURS_PROBE_REFUSED) printf '%s' 'office-hours-probe-refused' ;;
     TASKS_SUPERSEDE_REFUSED) printf '%s' 'tasks-supersede-refused' ;;
     REALITY_RECEIPT_UNRESOLVED) printf '%s' 'reality-receipt-unresolved' ;;
+    CEO_ONLY_CONFLICT) printf '%s' 'ceo-only-conflict' ;;
+    CEO_ONLY_AFTER_INIT) printf '%s' 'ceo-only-after-init' ;;
+    CEO_ONLY_NO_GATE) printf '%s' 'ceo-only-no-gate' ;;
+    SHADOW_BEFORE_ANSWER) printf '%s' 'shadow-before-answer' ;;
+    ARTIFACT_OWNER_WORDS) printf '%s' 'artifact-owner-words' ;;
+    BROWSE_TAB_UNRECOVERABLE) printf '%s' 'browse-tab-unrecoverable' ;;
+    BROWSE_SESSION_INVALID) printf '%s' 'browse-session-invalid' ;;
+    BROWSE_SESSION_ROOT_ONLY) printf '%s' 'browse-session-root-only' ;;
+    BROWSE_SESSION_TAB_RESET) printf '%s' 'browse-session-tab-reset' ;;
+    BROWSE_SESSION_LIMIT) printf '%s' 'browse-session-limit' ;;
+    BROWSE_DEVICE_UNKNOWN) printf '%s' 'browse-device-unknown' ;;
+    BROWSE_DEVICE_CDP_FAILED) printf '%s' 'browse-device-cdp-failed' ;;
+    BROWSE_TOUCH_NO_DEVICE) printf '%s' 'browse-touch-no-device' ;;
+    GSTACK_CLEAN_USAGE) printf '%s' 'gstack-clean-usage' ;;
+    GSTACK_CLEAN_TARGET_REFUSED) printf '%s' 'gstack-clean-target-refused' ;;
+    GSTACK_CLEAN_PARTIAL) printf '%s' 'gstack-clean-partial' ;;
+    GSTACK_CLEAN_INTERNAL) printf '%s' 'gstack-clean-internal' ;;
+    PLAIN_TITLE_REFUSED) printf '%s' 'plain-title-refused' ;;
+    PLAIN_BRANCH_REFUSED) printf '%s' 'plain-branch-refused' ;;
+    PLAIN_OPENING_REFUSED) printf '%s' 'plain-opening-refused' ;;
+    PLAIN_CHANGELOG_REFUSED) printf '%s' 'plain-changelog-refused' ;;
+    PLAIN_COMMIT_REFUSED) printf '%s' 'plain-commit-refused' ;;
+    PLAIN_POLICY_INVALID) printf '%s' 'plain-policy-invalid' ;;
     *) return 1 ;;
   esac
 }

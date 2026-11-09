@@ -107,6 +107,10 @@ const MODULE_SINKS = [
   // vendor CLI. hosts/ has no curl/fetch for the scanner to see, so the
   // receipt wiring is pinned here explicitly.
   'hosts/claude/hooks/memorable-user-prompt-hook.ts',
+  // GSTA-156 P1: the sealed guard lists and fetches the destination's own
+  // refs/pull/<n>/head for squashes on its base, to skip commits it already
+  // holds; PR numbers leave the machine, sink 'sealed-guard' (fail-open).
+  'lib/sealed-guard.ts',
 ];
 
 /** Shell sinks: must source the shared lib; every network op receipted. */
@@ -155,6 +159,8 @@ const SCANNER_EXEMPT: Record<string, string> = {
     'git fetch appears only in an error-message string',
   'bin/gstack-worktree-audit':
     'read-only audit: best-effort fetch of the user\'s own repo\'s base branch so the MERGED column is current (skipped with --no-fetch) — a user-repo dev-workflow op like gstack-next-version\'s, not gstack-state egress',
+  'lib/default-base.ts':
+    'read-only `git ls-remote --symref <remote> HEAD` of the user\'s own repo (5 s timeout, prompts off) to learn its live default branch, run only when the cached origin/HEAD names the checked-out branch (GST-774) — a user-repo dev-workflow op like gstack-next-version\'s, not gstack-state egress',
   'bin/gstack-state-matrix':
     'git fetch appears only in an error-message string (the fix the user runs when origin/<base> has no merge base)',
   'bin/gstack-redact-prepush':
@@ -171,7 +177,7 @@ const SCANNER_EXEMPT: Record<string, string> = {
     'served-page JS talking to its own loopback server (same-origin relative fetch)',
   'design/src/compare.ts':
     'served-page JS talking to its own loopback server (relative ./api fetch)',
-  'scripts/gate-cost-replay.ts':
+  'crew/scripts/gate-cost-replay.ts':
     'developer-invoked read-only measurement (GSTA-49 T0): git fetch of gstack\'s own origin by SHA (old PR heads and tested merge commits) so past PR gates can be replayed; a download only, no gstack or user state leaves the machine',
   'scripts/ubicloud':
     'developer-invoked test infrastructure: Ubicloud API calls (VM create/show/destroy) with the developer\'s own token, the checkout streamed over SSH to that developer\'s own ephemeral VM, and toolchain downloads run on the VM; no installed-gstack user state is sent',
@@ -419,7 +425,7 @@ describe('egress receipt wiring tripwire', () => {
   });
 
   test('NEW-SINK SCANNER: every outbound network op in the tree is wired or reasoned-exempt', () => {
-    const SWEEP = ['bin', 'lib', 'scripts', 'design/src', 'browse/src', 'hosts'];
+    const SWEEP = ['bin', 'lib', 'scripts', 'crew/bin', 'crew/lib', 'crew/scripts', 'design/src', 'browse/src', 'hosts'];
     const offenders: string[] = [];
     for (const dirRel of SWEEP) {
       const dir = path.join(ROOT, dirRel);

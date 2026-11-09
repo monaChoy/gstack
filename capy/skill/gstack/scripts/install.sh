@@ -17,6 +17,15 @@
 #   checkout it prints `gstack: ok not-needed for=none (...)` and exits 0; with
 #   one it prints the same trailer with the checkout's version, running nothing
 #   from the checkout. That ok admits no workflow (no verdict is written).
+#   From revision 4 the clone and the floor fast-forward follow the update
+#   channel (docs/releases.md#channels): GSTACK_UPDATE_CHANNEL=stable|main, else
+#   the checkout's bin/gstack-update-channel.sh (auto: stable in team mode),
+#   else main. On stable, a fresh clone checks out origin's stable branch and
+#   the floor fast-forward goes to stable, each only when stable exists and
+#   meets the supported minimum; otherwise main, as before. --revision wins.
+#   From revision 5 only GSTACK_UPDATE_CHANNEL=stable follows stable: Capy crews
+#   stay on main whatever the machine's update_channel or team_mode says (the
+#   checkout's bin/gstack-capy-session pins main for older copies too).
 # Everything else (Bun, setup, the doctor, the verdict, the launch line) is
 # the checkout's. The last line is the `gstack:` trailer; exit 0 only on
 # `gstack: ok`. Contract: docs/capy-install.md; tests:
@@ -27,9 +36,11 @@
 #   bash install.sh --check --for none        this machine runs no workflow: ok not-needed, nothing installed
 #   bash install.sh [--for <skill> | --require <id,id>] [--with-browser] [--revision <ref>] [--project <path>]
 # Environment: GSTACK_CAPY_ROOT (default ~/.local/share/gstack), GSTACK_CAPY_REPO,
-# GSTACK_CAPY_AUTO_UPGRADE=0 (never fast-forward), GSTACK_CAPY_FETCH_TIMEOUT (s).
+# GSTACK_CAPY_AUTO_UPGRADE=0 (no fast-forward; above the floor the checkout's session
+# overrides it past 24 hours behind unless GSTACK_PIN_REASON is set), GSTACK_CAPY_FETCH_TIMEOUT (s),
+# GSTACK_UPDATE_CHANNEL=stable (follow the tagged release; default main, every merge).
 set -u
-GSTACK_CAPY_WRAPPER=3
+GSTACK_CAPY_WRAPPER=5
 
 self="$(cd "$(dirname "$0")" && pwd -P)/$(basename "$0")"
 root="${GSTACK_CAPY_ROOT:-$HOME/.local/share/gstack}"
@@ -74,6 +85,23 @@ below() {
   return 1
 }
 support_get() { printf '%s\n' "$1" | sed -n "s/^$2=\([0-9][0-9.]*\)[[:space:]]*\$/\1/p" | head -1; }
+# channel_stable ROOT MIN [FETCH_FLAG] — true, with origin's stable commit in $stable_sha, when
+# GSTACK_UPDATE_CHANNEL=stable and origin's stable exists and meets MIN; says why not otherwise.
+# FETCH_FLAG is --depth=1 for a fresh clone only (never --depth into an existing checkout).
+channel_stable() {
+  local ver
+  [ "${GSTACK_UPDATE_CHANNEL:-}" = stable ] || return 1
+  if ! bounded git -C "$1" fetch --quiet ${3:+"$3"} origin stable 2>/dev/null; then
+    echo "gstack-capy-skill: channel stable, but origin has no stable branch yet (or the fetch failed); following main"
+    return 1
+  fi
+  stable_sha=$(git -C "$1" rev-parse FETCH_HEAD) ver=$(git -C "$1" show FETCH_HEAD:VERSION 2>/dev/null | head -1)
+  if [ -n "$2" ] && below "${ver:-0}" "$2"; then
+    echo "gstack-capy-skill: channel stable is at ${ver:-unknown}, below the supported minimum $2; following main"
+    return 1
+  fi
+  echo "gstack-capy-skill: channel stable ${ver:-unknown} (GSTACK_UPDATE_CHANNEL=main follows every merge)"
+}
 
 mkdir -p "$(dirname "$root")"
 if [ "$check" -eq 0 ]; then
@@ -100,6 +128,10 @@ if [ ! -f "$root/setup" ]; then
   fi
   remote_min=$(support_get "$(cat "$root/capy/support.env" 2>/dev/null)" GSTACK_MIN_REVISION)
   remote_version=$(head -1 "$root/VERSION" 2>/dev/null)
+  if [ -z "$revision" ] && channel_stable "$root" "$remote_min" --depth=1; then
+    git -C "$root" reset --quiet --hard "$stable_sha" \
+      || { echo "gstack: fail installer — could not check out origin/stable in $root; fix: GSTACK_UPDATE_CHANNEL=main $fix_cmd"; exit 1; }
+  fi
   export GSTACK_CAPY_CLONED="$repo"
 else
   # The remote's rules: fetch the default branch into FETCH_HEAD (never --depth
@@ -140,9 +172,11 @@ else
       echo "gstack: fail revision — installed $installed is below the supported minimum $remote_min ($cause); fix: $fix (REVISION_BELOW_MINIMUM)"
       exit 1
     fi
-    if ! git -C "$root" merge --ff-only -q FETCH_HEAD 2>/dev/null; then
+    target=$(git -C "$root" rev-parse FETCH_HEAD)
+    if channel_stable "$root" "$remote_min" && git -C "$root" merge-base --is-ancestor HEAD "$stable_sha" 2>/dev/null; then target=$stable_sha; fi
+    if ! git -C "$root" merge --ff-only -q "$target" 2>/dev/null; then
       git -C "$root" fetch --quiet --unshallow origin "$default" 2>/dev/null
-      git -C "$root" merge --ff-only -q FETCH_HEAD 2>/dev/null \
+      git -C "$root" merge --ff-only -q "$target" 2>/dev/null \
         || { echo "gstack: fail revision — installed $installed is below the supported minimum $remote_min (fast-forward failed); fix: git -C $root status, then $fix_cmd (REVISION_BELOW_MINIMUM)"; exit 1; }
     fi
     echo "gstack-capy-skill: upgraded $installed -> $(head -1 "$root/VERSION")"

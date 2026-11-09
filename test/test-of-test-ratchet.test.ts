@@ -62,7 +62,6 @@ const BASELINE = [
   'test/codex-eval-recording.test.ts',
   'test/codex-resume-flag-semantics.test.ts',
   'test/context-restore-fragment-verdict.test.ts', // GSTA-91: replays three captured false reds (0/3 on main cb99df4) through the paid context-restore-fragment-match case's fragmentRestoreVerdict
-  'test/cookie-workflow-judge-input.test.ts', // slices test/skill-llm-eval.test.ts source (recorded 2026-10 when the ratchet learned paid-source slicing)
   'test/cso-ntfs-fixture.test.ts',
   'test/cso-windows-build-contract.test.ts',
   'test/dependency-security.test.ts',
@@ -104,6 +103,7 @@ const BASELINE = [
   'test/extension-pty-inject-invariant.test.ts',
   'test/gbrain-source-worktree-advance.test.ts',
   'test/gbrain-sync-voyage-code-3-integration.test.ts',
+  'test/git-fixture-template.test.ts', // GSTA-151: pins the copy isolation and leak scan of test/helpers/git-fixture-template.ts, which the templated git fixtures in release-cut, train-backstop, restamp-mentions, pregate-user-policy and held-install-recovery rely on
   'test/gstack-gbrain-source-wireup.test.ts',
   'test/gstack-home-module-scope.test.ts',
   'test/gstack-upgrade-migration-v1_17_0_0.test.ts',
@@ -132,6 +132,7 @@ const BASELINE = [
   'test/ios-qa-stateserver-hardening.test.ts',
   'test/ios-qa-swift-build.test.ts',
   'test/jargon-list.test.ts',
+  'test/land-direct-recovery-isolation.test.ts', // GST-1613: runs test/ship-queue-land-direct.test.ts and test/ubicloud-runner-recovery.test.ts in one bun process; the product code is what those two files run
   'test/llm-judge-frontier.test.ts',
   'test/llm-judge-stream.test.ts', // landed in v1.91.7.0 before this ratchet: harness owner for its functional-QA/docsync paid evals
   'test/memory-cache-injection.test.ts',
@@ -208,6 +209,7 @@ const BASELINE = [
   'test/review-enum-lifecycle.test.ts',
   'test/review-n-plus-one-contract.test.ts',
   'test/review-quality-provenance.test.ts', // landed in v1.91.7.0 before this ratchet: harness owner for its functional-QA/docsync paid evals
+  'test/sdk-system-prompt-tripwire.test.ts', // the Agent SDK prompt tripwire: its subject is the eval harness (test/helpers/sdk-system-prompt.ts, agent-sdk-runner.ts) and every SDK caller under test/
   'test/session-runner-browse-errors.test.ts', // slices test/skill-e2e-review.test.ts source (recorded 2026-10 when the ratchet learned paid-source slicing)
   'test/session-runner-stream-lifecycle.test.ts',
   'test/session-runner-timeout.test.ts',
@@ -239,9 +241,8 @@ const BASELINE = [
   'test/test-free-shards-capture.test.ts',
   'test/timeline.test.ts',
   'test/ubicloud-runner-reattach.test.ts', // GSTA-151: split from test/ubicloud-runner.test.ts for shard time; runs scripts/ubicloud/ubi-runner.sh through test/helpers/ubi-runner-fake-vm.ts
+  'test/ubicloud-runner-recovery.test.ts', // GST-1220: recovery bundle and results sink; runs scripts/ubicloud/ubi-runner.sh through test/helpers/ubi-runner-fake-vm.ts
   'test/ubicloud-runner-tiers.test.ts', // GSTA-151: split from test/ubicloud-runner.test.ts for shard time; runs scripts/ubicloud/ubi-runner.sh through test/helpers/ubi-runner-fake-vm.ts
-  'test/workflow-judge-cache.test.ts', // slices test/skill-llm-eval.test.ts source (recorded 2026-10 when the ratchet learned paid-source slicing)
-  'test/workflow-judge-input.test.ts', // slices test/skill-llm-eval.test.ts source (recorded 2026-10 when the ratchet learned paid-source slicing)
 ];
 
 function freeTests(): string[] {
@@ -263,7 +264,7 @@ function testsOnlyTestCode(file: string): { counted: boolean; helper?: string } 
   if (slicedPaidSources(source).length) return { counted: true, helper };
   if (targets.some(target => !target.startsWith('test/') && !target.startsWith('node_modules/'))) return { counted: false };
   if (/(['"`])[^'"`\n]*(?:\bbin\/|SKILL\.md|CLAUDE\.md|\.tmpl)[^'"`\n]*\1/.test(source)) return { counted: false };
-  if (/(['"`])(?:\.\/)?\.github\b[^'"`\n]*\1|(['"`])bin\2\s*,\s*(?:(['"`])[\w.-]+\3|[A-Za-z_$])/.test(source)) return { counted: false };
+  if (/(['"`])(?:\.\/)?\.github\b[^'"`\n]*\1|(['"`])bin\2\s*(?:\)|,\s*(?:(['"`])[\w.-]+\3|[A-Za-z_$]))/.test(source)) return { counted: false };
   // A repo script run or read by path (`scripts/gen-skill-docs.ts`, `path.join(ROOT, 'setup')`) is product code too.
   if (/(['"`])(?:\.\/)?scripts\/[\w./-]+\1|ROOT\s*,\s*(['"`])setup\2/.test(source)) return { counted: false };
   return { counted: true, helper };

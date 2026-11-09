@@ -35,6 +35,10 @@ const HOOK_FILES = [
   'lib/result-codes-budget.ts',
   'lib/result-codes-eval.ts',
   'lib/result-codes-plan.ts',
+  'lib/result-codes-autoplan.ts',
+  'lib/result-codes-browse.ts',
+  'lib/result-codes-clean.ts',
+  'lib/result-codes-plain.ts',
 ];
 const SLUG = 'stop-hook-slug-test';
 const BUDGET_MS = 2000;

@@ -62,6 +62,13 @@ describe("HIGH credential patterns", () => {
     ],
     ["google.oauth_client_secret", 'client_secret: "GOCSPX-' + "Ab3xQ9zLmNp2RtVw7YkD1sHf" + '"'],
     ["telegram.bot_token", "TELEGRAM_TOKEN=8326208591:AA" + "HdqRy9Lm2ZpXvKb4NcQw8TuEr6YoP1sVg"],
+    ["aws.access_key", "temporary key ASIA" + "ZQ3XN7P2LM4RT8WV"],
+    ["github.user_to_server", "ghu_" + "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8"],
+    ["github.refresh", "ghr_" + "a1B2c3D4e5F6g7H8i9J0".repeat(3) + "k1L2m3N4o5P6q7R8"],
+    ["openrouter.key", "OPENROUTER sk-or-v1-" + "9f8e7d6c5b4a39281706f5e4d3c2b1a0".repeat(2)],
+    ["stripe.restricted", "rk_live_" + "a1B2c3D4e5F6g7H8i9J0k1L2"],
+    ["supabase.secret", "sb_secret_" + "tR4i6cyMIrYTE3s6OyHGHw_ppx2p6WK"],
+    ["supabase.pat", "sbp_" + "9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c"],
   ];
   for (const [id, text] of cases) {
     test(`flags ${id}`, () => {
@@ -347,6 +354,46 @@ describe("MEDIUM demoted credential-shaped patterns (TENSION-1)", () => {
       [`    'password: ${vIdent} more',`, "lib/a.dart"], [`    "password: ${vIdent} more",`, "app.py"],
     ] as const) expect({ literal, file, kv: kv(literal, file) }).toEqual({ literal, file, kv: true });
   });
+  // Value: protects=an interpolated expression inside a Python f-string or Dart string is skipped whole, so a quote inside it never ends the outer string; fails_when=a """/''' delimiter in a nested string closes the block early and a password: line inside it reads as code;
+  //   why_new=GST-738 (outside voice); seam=none; no_claim=Python before 3.12, where the nested quote is a syntax error
+  test("env.kv: a quote inside an f-string or Dart interpolation does not end the string (GST-738)", () => {
+    const kv = (text: string, sourcePath: string) => scan(text, { repoVisibility: "private", sourcePath, processEnv: {} }).findings.some((f) => f.id === "env.kv");
+    const v = "Fk2pQ9vXz4wL7mN3rT6yB1cD5eG0hJx";
+    for (const [literal, file] of [
+      [`CONFIG = f'''\n{"'''"}\npassword: ${v}\n'''\n`, "app.py"],
+      [`CONFIG = rf"""\n{x.replace('"""', "")}\npassword: ${v}\n"""\n`, "app.py"],
+      [`CONFIG = f'''\n{f"{'\'\'\''}"}\npassword: ${v}\n'''\n`, "app.py"],
+      [`const s = '''\${"'''"}\npassword: ${v}\n''';\n`, "lib/a.dart"],
+      [`const s = """\${m["k"] ?? '"""'}\npassword: ${v}\n""";\n`, "lib/a.dart"],
+      // A comment inside an interpolation holds no delimiter, and a Dart block comment is text.
+      [`CONFIG = f"""\n{1 # } """\n}\npassword: ${v}\n"""\n`, "app.py"],
+      [`const s = '''\${x // '''\n}\npassword: ${v}\n''';\n`, "lib/a.dart"],
+      [`void main() {}\n/*\npassword: ${v}\n*/\n`, "lib/a.dart"],
+      // A format spec is text: its # or quote opens nothing.
+      [`render({\n    "id": f"{n:#x}",\n}, """\npassword: ${v}\n""")\n`, "app.py"],
+      [`render({\n    "id": f"{n:'>10}",\n}, """\npassword: ${v}\n""")\n`, "app.py"],
+      [`render({\n    "id": f"{n!r:{w}}",\n}, """\npassword: ${v}\n""")\n`, "app.py"],
+      // A # comment in a single-quoted f-string's multi-line field holds no delimiter either.
+      [`msg = f"{\n  1 # }" """\n}"\nCONFIG = """\npassword: ${v}\n"""\n`, "app.py"],
+      // In an f-string a backslash does not escape the brace after it.
+      [`CONFIG = f"""\\{"""\npassword: ${v}\n"""}"""\n`, "app.py"],
+      // Nesting past the depth cap runs to the end of the text instead of overflowing the stack.
+      ["const s = '" + "${'".repeat(20000) + `\npassword: ${v}\n`, "lib/a.dart"],
+      ["x = f'" + "{a:".repeat(100000) + `\npassword: ${v}\n`, "app.py"],
+    ] as const) expect({ literal, kv: kv(literal, file) }).toEqual({ literal, kv: true });
+    for (const [code, file] of [
+      ["msg = f'{a}:{b}'\ndef f(\n    session: HttpSession,\n): pass\n", "app.py"],
+      ["msg = f'''{{literal brace'''\ndef f(\n    session: HttpSession,\n): pass\n", "app.py"],
+      ["msg = f'{x:>{width}}'\ndef f(\n    session: HttpSession,\n): pass\n", "app.py"],
+      ["msg = f\"{when:%b %d '%y} {d[':']} {a[1:2]} {a!=b}\"\nrows = {\n    \"password\": session.password,\n}\n", "app.py"],
+      // Code inside a multi-line interpolation is code, not string text.
+      ["msg = f\"{\n {\n  'password': request.password,\n }\n}\"\n", "app.py"],
+      ["final s = \"${login(\n  password: request.password,\n)}\";\n", "lib/a.dart"],
+      ["if'a' in s: pass\ndef f(\n    session: HttpSession,\n): pass\n", "app.py"],
+      ["final s = 'hi ${user.name} and $id';\n  login(password: request.password);\n", "lib/a.dart"],
+      ["final s = r'${raw}';\n  login(password: request.password);\n", "lib/a.dart"],
+    ] as const) expect({ code, kv: kv(code, file) }).toEqual({ code, kv: false });
+  });
   test("env.kv's source-syntax check stays linear on a match-dense file (#3630)", () => {
     for (const file of ["app.py", "src/a.ts"]) {
       const text = "def f(\n" + "    session: HttpSession,\n".repeat(12_000) + "): pass\n";
@@ -420,6 +467,20 @@ describe("#1946 pattern negatives (placeholders never fire)", () => {
     expect(ids("dop_v1_short")).not.toContain("digitalocean.token");
     // pem header WITHOUT the GCP JSON shape stays pem.private_key only.
     expect(ids("-----BEGIN PRIVATE KEY-----")).not.toContain("gcp.service_account");
+  });
+});
+
+describe("OpenRouter, GitHub ghu_/ghr_, Stripe restricted, Supabase and AWS temporary key negatives", () => {
+  test("near-miss shapes never fire", () => {
+    expect(ids("sk-or-v1-" + "9f8e7d6c5b4a39281706f5e4d3c2b1a0")).not.toContain("openrouter.key");
+    expect(ids("ghu_" + "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R")).not.toContain("github.user_to_server");
+    expect(ids("ghr_" + "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R")).not.toContain("github.refresh");
+    expect(ids("rk_test_" + "a1B2c3D4e5F6g7H8i9J0k1L2")).not.toContain("stripe.restricted");
+    expect(ids("sb_publishable_" + "tR4i6cyMIrYTE3s6OyHGHw_ppx2p6WK")).not.toContain("supabase.secret");
+    expect(ids("sb_secret_key")).not.toContain("supabase.secret");
+    expect(ids("sbp_" + "9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6")).not.toContain("supabase.pat");
+    expect(ids("sbp_" + "Zf8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c")).not.toContain("supabase.pat");
+    expect(ids("ASIA" + "ZQ3XN7P2LM4RT8W")).not.toContain("aws.access_key");
   });
 });
 
@@ -707,6 +768,12 @@ describe("redactFindingSpans — machine-egress masking (#1947)", () => {
     const token = "ghp_" + "1234567890abcdefghijklmnopqrstuvwxyz";
     const out = redactFindingSpans(`auth ${token} rejected`, { repoVisibility: "private" });
     expect(out).toBe("auth <REDACTED-github.pat> rejected");
+  });
+
+  test("a 76-character GitHub refresh token is masked whole", () => {
+    const token = "ghr_" + "a1B2c3D4e5F6g7H8i9J0".repeat(3) + "k1L2m3N4o5P6q7R8";
+    const out = redactFindingSpans(`auth ${token} rejected`, { repoVisibility: "private" });
+    expect(out).toBe("auth <REDACTED-github.refresh> rejected");
   });
 
   test("multiple findings are all replaced (right-to-left splice keeps offsets valid)", () => {

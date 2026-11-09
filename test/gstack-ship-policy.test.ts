@@ -8,8 +8,9 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { EXIT } from '../lib/headless-artifacts';
-import { BUMP_NEVER_KEY_VERSION, CHANGELOG_FRAGMENTS_KEY_VERSION, DEFAULT_POLICY, POLICY_KEYS, POLICY_KEY_INTRODUCED, REVIEW_SCOPE_KEY_VERSION, globToRegExp, matchesAny, minimumReader, shipConsequences, validatePolicy } from '../lib/ship-policy';
-import { fillDue } from '../lib/ship-queue-train';
+import { BUMP_NEVER_KEY_VERSION, CHANGELOG_FRAGMENTS_KEY_VERSION, DEFAULT_POLICY, POLICY_KEYS, POLICY_KEY_INTRODUCED, REVIEW_SCOPE_KEY_VERSION, STAMP_PLACEHOLDERS_KEY_VERSION, globToRegExp, matchesAny, minimumReader, shipConsequences, validatePolicy } from '../lib/ship-policy';
+import { PLAN_RECORD_KEY_VERSION } from '../lib/ship-policy-keys';
+import { fillDue } from '../crew/lib/ship-queue-train';
 import { cmpVersion, parseVersion } from '../lib/version-source';
 import { BASE_POLICY, cleanup, makeFixtureRepo, runBin, type FixtureRepo } from './helpers/restamp-fixture';
 
@@ -40,6 +41,10 @@ describe('validatePolicy (schema + containment, pure)', () => {
     const earlier = REVIEW_SCOPE_KEY_VERSION.replace(/(\d+)\.0$/, (_, p) => `${Number(p) - 7}.0`);
     expect(codes({ review_scope: 'all', min_gstack_version: earlier })).toEqual(['POLICY_INVALID:review_scope']);
     expect(codes({ review_scope: 'frozen' })).toEqual([]);
+    // Value: protects=plan_record accepts only off|warn|require; fails_when=the enum guard is removed or loosened; why_new=no plan_record row; seam=none; no_claim=ready/land enforcement
+    expect(codes({ plan_record: 'strict' })).toContain('POLICY_INVALID:plan_record');
+    expect(codes({ plan_record: true })).toContain('POLICY_INVALID:plan_record');
+    for (const v of ['off', 'warn', 'require']) expect(codes({ plan_record: v, min_gstack_version: PLAN_RECORD_KEY_VERSION })).toEqual([]);
     expect(codes([])).toEqual(['POLICY_INVALID:']);
   });
 
@@ -61,6 +66,32 @@ describe('validatePolicy (schema + containment, pure)', () => {
     expect(codes({ mirror: '.' })).toEqual(['POLICY_CONTAINMENT:mirror']);
     expect(codes({ mirror: '..' })).toEqual(['POLICY_CONTAINMENT:mirror']);
     expect(codes({ preregistration_shas: ['not-a-sha'] })).toEqual(['POLICY_CONTAINMENT:preregistration_shas[0]']);
+  });
+
+  // Value: protects=stamp_placeholders defaults to none, needs its reader floor, and admits only short one-line literals
+  //   that are neither the {version} slot nor a version (GST-1026); fails_when=a non-default value validates without
+  //   min_gstack_version, or a version, a slot, a multi-line or an oversized entry is accepted; seam=validatePolicy
+  test('stamp_placeholders: empty by default, needs its floor, and admits only short literal placeholders (GST-1026)', () => {
+    const codes = (p: unknown) => validatePolicy(p).map(e => `${e.code}:${e.path}`);
+    const at = (stamp_placeholders: unknown) => codes({ stamp_placeholders, min_gstack_version: STAMP_PLACEHOLDERS_KEY_VERSION });
+    expect(DEFAULT_POLICY.stamp_placeholders).toEqual([]);
+    expect(POLICY_KEY_INTRODUCED.stamp_placeholders).toBe(STAMP_PLACEHOLDERS_KEY_VERSION);
+    expect(codes({ stamp_placeholders: [] })).toEqual([]);
+    expect(codes({ stamp_placeholders: ['TBD'] })).toEqual(['POLICY_INVALID:stamp_placeholders']);
+    expect(minimumReader({ stamp_placeholders: ['TBD'] })).toBe(STAMP_PLACEHOLDERS_KEY_VERSION);
+    expect(at(['TBD', 'UNRELEASED'])).toEqual([]);
+    expect(at('TBD')).toEqual(['POLICY_INVALID:stamp_placeholders']);
+    expect(at([7])).toEqual(['POLICY_INVALID:stamp_placeholders[0]']);
+    expect(at(Array.from({ length: 17 }, (_, i) => `P${i}`))).toEqual(['POLICY_CONTAINMENT:stamp_placeholders']);
+    expect(at(['x'.repeat(33)])).toEqual(['POLICY_CONTAINMENT:stamp_placeholders[0]']);
+    expect(at(['x'.repeat(32)])).toEqual([]);
+    expect(at(['TB\nD'])).toEqual(['POLICY_CONTAINMENT:stamp_placeholders[0]']);
+    expect(at([''])).toEqual(['POLICY_CONTAINMENT:stamp_placeholders[0]']);
+    expect(at(['  '])).toEqual(['POLICY_CONTAINMENT:stamp_placeholders[0]']);
+    expect(at(['{version}'])).toEqual(['POLICY_INVALID:stamp_placeholders[0]']);
+    expect(at(['next-{version}'])).toEqual(['POLICY_INVALID:stamp_placeholders[0]']);
+    expect(at(['1.2.3.0'])).toEqual(['POLICY_INVALID:stamp_placeholders[0]']);
+    expect(at(['0.60.553'])).toEqual(['POLICY_INVALID:stamp_placeholders[0]']);
   });
 
   // Value: protects=bump never is refused without its floor (an older gstack names the cause) and next to any policy that stamps a version at every merge, reports its reader floor, and prints its Step 12 consequence; fails_when=never validates bare, or beside stamp-at-merge, train or changelog_fragments;
@@ -152,7 +183,7 @@ describe("gstack's own .gstack/ship-policy.json", () => {
     for (const f of fs.readdirSync(path.join(root, '.github/workflows')).filter(f => f.endsWith('.yml'))) {
       const text = fs.readFileSync(path.join(root, '.github/workflows', f), 'utf8');
       const on = text.slice(text.search(/^on:/m), text.search(/^jobs:/m));
-      if (!/^\s+pull_request:/m.test(on) || /^\s+paths(-ignore)?:/m.test(on)) continue;
+      if (!/^\s+pull_request(?:_target)?:/m.test(on) || /^\s+paths(-ignore)?:/m.test(on)) continue;
       const body = text.slice(text.search(/^jobs:/m));
       for (const m of body.matchAll(/^  ([A-Za-z0-9_-]+):\n((?:    .*\n|\s*\n)*)/gm)) {
         const name = /^    name:\s*(.+)$/m.exec(m[2]!)?.[1]?.trim();
@@ -160,6 +191,17 @@ describe("gstack's own .gstack/ship-policy.json", () => {
       }
     }
     expect(raw.changelog_fragments.required_checks.filter((n: string) => !jobs.has(n))).toEqual([]);
+  });
+
+  // Value: protects=land.merged_checks on gstack itself (GST-1332): its tests run through the strict free runner on a committed list that keeps the ship/DRIVER.md cap guard (#3886), so an early exit or a missing file fails instead of passing; fails_when=a command goes back to raw bun test (which exits 0 when a test calls process.exit(0) and skips a missing file), test/ship-driver.test.ts leaves the list, or a listed file is gone; why_new=gstack's own policy gained the land key; seam=the policy file and test/land-merged-checks.txt; no_claim=that the commands pass on a merged tree (ship-queue-land-direct covers the engine)
+  test('land.merged_checks runs its tests through the strict runner on a list that exists and keeps the ship/DRIVER.md cap guard', () => {
+    const root = path.join(import.meta.dir, '..');
+    const checks: string[] = JSON.parse(fs.readFileSync(path.join(root, '.gstack', 'ship-policy.json'), 'utf8')).land.merged_checks;
+    expect(checks.filter(c => /\bbun test\b/.test(c))).toEqual([]);
+    expect(checks).toContain('bun run scripts/test-free-shards.ts --files-from test/land-merged-checks.txt --wall-timeout 600');
+    const files = fs.readFileSync(path.join(root, 'test', 'land-merged-checks.txt'), 'utf8').split('\n').filter(Boolean);
+    expect(files).toContain('test/ship-driver.test.ts');
+    expect(files.filter(f => !fs.existsSync(path.join(root, f)))).toEqual([]);
   });
 
   // Value: protects=the fill rule the coordinator relies on: a train dispatches at 5 READY PRs or one hour after the first READY, whichever comes first

@@ -223,7 +223,8 @@ describe('loop summary', () => {
       { skill: 'review', via: 'ship', review_binding: { state: 'changed', started_at: '2026-10-26T09:00:00.000Z' }, findings: [{ fingerprint: 'old:1:q', action: 'noted' }] },
       { skill: 'review', via: 'ship', findings: [{ fingerprint: 'undated:1:q', action: 'noted' }] },
     ];
-    expect(summarizeReviewLoop(rows, '2026-10-26T09:30:00Z')).toEqual({ passes: 3, blocking_found: 1, deferred: 0, noted: 2, fixed: 1, scope: 'frozen', rounds: 3 });
+    expect(summarizeReviewLoop(rows, '2026-10-26T09:30:00Z')).toEqual({ passes: 3, blocking_found: 1, deferred: 0, noted: 2, fixed: 1, scope: 'frozen', rounds: 3,
+      unbound: ['row review pass=?: no start token and no readable timestamp, so it cannot be placed in this run'] });
   });
 });
 
@@ -423,30 +424,30 @@ describe('gstack-review-scope (bin)', () => {
     fs.writeFileSync(path.join(logDir, `${branch}-reviews.jsonl`), rows.map(r => JSON.stringify(r)).join('\n') + '\n{not json\n');
     const expected = { passes: 2, blocking_found: 2, deferred: 1, noted: 1, fixed: 1, scope: 'frozen', rounds: 2 };
     const out = path.join(repo.root, 'review-loop.json');
-    const r = runBin(repo, 'gstack-review-scope', ['summary', '--since', '2026-10-26T09:30:00Z', '--out', out, '--json']);
+    const r = runBin(repo, 'gstack-review-scope', ['summary', '--no-ledger', '--since', '2026-10-26T09:30:00Z', '--out', out, '--json']);
     expect(r.status).toBe(EXIT.ok);
     expect(r.err).toContain('REVIEW_LOOP: passes=2 blocking_found=2 deferred=1 noted=1 fixed=1 scope=frozen');
     expect(JSON.parse(r.out)).toEqual(expected);
     expect(JSON.parse(fs.readFileSync(out, 'utf8'))).toEqual(expected);
-    const plain = runBin(repo, 'gstack-review-scope', ['summary', '--since', '2026-10-26T08:00:00Z']);
+    const plain = runBin(repo, 'gstack-review-scope', ['summary', '--no-ledger', '--since', '2026-10-26T08:00:00Z']);
     expect(plain.status).toBe(EXIT.ok);
     expect(plain.out.trim()).toBe('REVIEW_LOOP: passes=3 blocking_found=3 deferred=1 noted=1 fixed=2 scope=frozen');
     const noSince = runBin(repo, 'gstack-review-scope', ['summary', '--json']);
     expect(noSince.status).toBe(EXIT.fail);
     expect(noSince.err).toContain('(REVIEW_SCOPE_INPUT;');
     expect(noSince.out).toBe('');
-    const badSince = runBin(repo, 'gstack-review-scope', ['summary', '--since', 'yesterday']);
+    const badSince = runBin(repo, 'gstack-review-scope', ['summary', '--no-ledger', '--since', 'yesterday']);
     expect(badSince.status).toBe(EXIT.fail);
     expect(badSince.err).toContain('(REVIEW_SCOPE_INPUT;');
     // zero matching passes is a wrong --since or a log written elsewhere, never a loop to record: refused, nothing written
     const bare = fixture();
     const noneOut = path.join(bare.root, 'review-loop.json');
-    const none = runBin(bare, 'gstack-review-scope', ['summary', '--since', '2026-10-26T09:30:00Z', '--out', noneOut, '--json']);
+    const none = runBin(bare, 'gstack-review-scope', ['summary', '--no-ledger', '--since', '2026-10-26T09:30:00Z', '--out', noneOut, '--json']);
     expect(none.status).toBe(EXIT.fail);
     expect(none.err).toContain('(REVIEW_SCOPE_INPUT;');
     expect(none.err).toContain('REVIEW_LOOP: passes=0');
     expect(fs.existsSync(noneOut)).toBe(false);
-    const late = runBin(repo, 'gstack-review-scope', ['summary', '--since', '2026-10-27T00:00:00Z']);
+    const late = runBin(repo, 'gstack-review-scope', ['summary', '--no-ledger', '--since', '2026-10-27T00:00:00Z']);
     expect(late.status).toBe(EXIT.fail);
   });
 });
@@ -522,4 +523,33 @@ describe('GSTA-167 part 4b: untested state-matrix cells map below the floor per 
     expect(r.stdout).toBe(mapStateMatrixOutput(fs.readFileSync(FIXTURE, 'utf8')).text);
     expect(fs.readFileSync(path.join(ROOT, 'review', 'specialists', 'state-machines.md'), 'utf8')).toContain('- **Untested cell (CRITICAL; this rule\'s High tier).**');
   });
+});
+
+describe('gstack-review-scope classify on a diff past 64 MB (GST-1855)', () => {
+  // Value: protects=a results PR whose branch diff passes 64 MB still gets its findings placed; fails_when=classify reads git diff
+  //   through a bounded pipe again and refuses harness-evals #320's 67 MB diff with an empty reason; seam=gstack-review-scope classify
+  test('classify places findings in a 70 MB branch diff', () => {
+    const repo = fixture();
+    const src = path.join(repo.work, 'src');
+    fs.mkdirSync(src, { recursive: true });
+    fs.writeFileSync(path.join(src, 'auth.ts'), Array.from({ length: 30 }, (_, i) => `line ${i + 1}`).join('\n') + '\n');
+    repo.git('add', '.'); repo.git('commit', '-qm', 'seed'); repo.git('push', '-q', 'origin', 'main');
+    repo.git('checkout', '-qb', 'feat');
+    fs.mkdirSync(path.join(repo.work, 'results'));
+    fs.writeFileSync(path.join(repo.work, 'results', 'trials.jsonl'), `{"trial":"${'x'.repeat(1010)}"}\n`.repeat(70_000));
+    const lines = fs.readFileSync(path.join(src, 'auth.ts'), 'utf8').split('\n');
+    lines[9] = 'line 10 changed';
+    fs.writeFileSync(path.join(src, 'auth.ts'), lines.join('\n'));
+    repo.git('add', '.'); repo.git('commit', '-qm', 'results and a fix');
+    const f = path.join(repo.root, 'findings.json');
+    fs.writeFileSync(f, JSON.stringify([
+      { fingerprint: 'src/auth.ts:10:logic', path: 'src/auth.ts', line: 10, severity: 'CRITICAL', category: 'logic', summary: 'wrong' },
+      { fingerprint: 'src/auth.ts:25:logic', path: 'src/auth.ts', line: 25, severity: 'CRITICAL', category: 'logic', summary: 'neighbour' },
+      { fingerprint: 'results/trials.jsonl:3:data', path: 'results/trials.jsonl', line: 3, severity: 'INFORMATIONAL', category: 'data', summary: 'row' },
+    ]));
+    const p1 = runBin(repo, 'gstack-review-scope', ['classify', '--base', 'main', '--pass', '1', '--findings', f, '--json']);
+    expect(p1.status, p1.err).toBe(EXIT.ok);
+    expect(JSON.parse(p1.out).findings.map((x: ScopedFinding) => `${x.fingerprint}=${x.locus}`)).toEqual([
+      'src/auth.ts:10:logic=diff', 'src/auth.ts:25:logic=outside', 'results/trials.jsonl:3:data=diff']);
+  }, 120_000);
 });

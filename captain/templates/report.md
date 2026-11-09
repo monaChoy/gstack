@@ -6,6 +6,8 @@ Written by the lane when it finishes. The controller reads this before chat.
 
 <what shipped, in two or three sentences; what was out of scope and where it went>
 
+Unverified: <none | each claim above that the lane did not check itself, and why>
+
 ## PR
 
 | PR | Head (full SHA) | Version | Checks | Train |
@@ -16,7 +18,7 @@ READY block sent: <yes, date> · SHIP_RECEIPT: pr=<n> head=<sha12 of the pin, as
 
 ## Needs
 
-<"nothing", or the owner's decisions in the ask format (gstack docs/captain.md): one lettered line each, "A1 to take recommendation">
+<"nothing", or the owner's decisions in the ask format (gstack crew/docs/captain.md): one lettered line each, "A1 to take recommendation">
 
 ## Cost
 

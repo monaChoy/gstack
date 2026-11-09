@@ -5,7 +5,7 @@
  * 2026-10-03 periodic and gate census artifacts (run 37151477069, commit
  * ac20ef1), whose report counted deselections as SKIPPED 82/282 and left
  * 72/24 testcases unattributed. Budget records follow the current declared
- * policy (plan-mode-no-op: 3,720,000 ms since v1.91.18.0 added its devex member).
+ * policy (plan-mode-no-op: 2,520,000 ms since its plan-eng-review member retired, GST-1698).
  * The periodic fixture is re-shaped to the current case shards: qa-workflow runs
  * as its qa-fix-loop case shard (its three gate-tier siblings become sibling
  * deselections) and the review carve runs as a case of the consolidated
@@ -123,6 +123,29 @@ describe('a case shard\'s result records are its one case\'s cost (2026-10-26 tr
     expect(collector(r.dir).verdict.costUsd).toBe(0.75);
   });
 
+  test('a record-less trial\'s streamed session cost reaches the trial and the verdict total once (GSTA-150 outside voice: $0.65 known, headline $0.00)', () => {
+    const ledger = (dir: string, slug: string, costs: number[]) => fs.writeFileSync(path.join(shard(dir, slug), 'session-ledger.jsonl'),
+      costs.map(cost => JSON.stringify({ key: 'k', runner: 'agent-sdk', started_at: 't', elapsed_ms: 1, end: 'aborted', billed: false, streamed_cost_usd: cost })).join('\n') + '\n');
+    const r = report('periodic', dir => {
+      ledger(dir, 'skill-e2e-qa-workflow--qa-fix-loop', [0.4, 0.25]);
+      results(dir, 'skill-e2e-benchmark-providers', [{ name: 'benchmark-providers-live', suite: 's', tier: 'e2e', passed: true, duration_ms: 1, cost_usd: 0.1 }]);
+      ledger(dir, 'skill-e2e-benchmark-providers', [0.5]);
+    });
+    expect(r.history.find(record => record.case === 'qa-fix-loop')).toMatchObject({ outcome: 'passed', cost_usd: 0.65 });
+    expect(r.history.find(record => record.case === 'benchmark-providers-live')).toMatchObject({ cost_usd: 0.6 });
+    expect(collector(r.dir).verdict.costUsd).toBe(1.25);
+    expect(r.out).toContain('cost $1.25 known + 5 of 7 trial(s) cost unknown');
+  });
+
+  test('a billed session\'s cost is already in its collector total, so the verdict never adds it again (Codex host, unbound label record)', () => {
+    const r = report('periodic', dir => {
+      results(dir, 'skill-e2e-cso', [{ name: '/cso full audit', suite: 'cso', tier: 'e2e', passed: true, duration_ms: 1, cost_usd: 0.5 }]);
+      fs.writeFileSync(path.join(shard(dir, 'skill-e2e-cso'), 'session-ledger.jsonl'),
+        JSON.stringify({ key: 'k', runner: 'codex', started_at: 't', elapsed_ms: 1, end: 'completed', billed: true, cost_usd: 0.5 }) + '\n');
+    });
+    expect(collector(r.dir).verdict.costUsd).toBe(0.5);
+  });
+
   // Value: protects=a failed case shard's trial reads its failure class, exit reason, error and cost from the display-labelled record the shard
   // wrote, not a generic 'assertion' with the JUnit message (the same attribution the cost fix made; train-gate's INFRA/VERDICT class follows failure_class);
   // fails_when=failedRecord is looked up through the old name/case_id-only filter again so the record's class and error are dropped;
@@ -178,42 +201,43 @@ describe('record builders attach ledger sessions and failure causes (plan 0.1/0.
 });
 
 describe('red lines carry their values, evidence and a one-case command (plan 0.3)', () => {
-  const QA_ONLY = 'qa-only/SKILL.md workflow';
+  const JUDGE_CASE = 'llm-judge-recommendation';
+  const JUDGE_FILE = 'test/llm-judge-recommendation.test.ts';
   const addJudgeRed = (dir: string) => {
-    const shard = path.join(dir, 'paid-slice-1-a1', 'shards', 'skill-llm-eval');
+    const shard = path.join(dir, 'paid-slice-1-a1', 'shards', 'llm-judge-recommendation');
     fs.mkdirSync(shard, { recursive: true });
     const message = 'expect(received).toBeGreaterThanOrEqual(expected)\n\nExpected: &gt;= 4\nReceived: 3.6666666666666665\n';
-    fs.writeFileSync(path.join(shard, 'junit.xml'), `<?xml version="1.0" encoding="UTF-8"?>\n<testsuites><testsuite name="test/skill-llm-eval.test.ts">`
-      + `<testcase name="${QA_ONLY}" classname="Other skill evals" time="34.8" file="test/skill-llm-eval.test.ts" line="9">`
+    fs.writeFileSync(path.join(shard, 'junit.xml'), `<?xml version="1.0" encoding="UTF-8"?>\n<testsuites><testsuite name="${JUDGE_FILE}">`
+      + `<testcase name="${JUDGE_CASE}" classname="llm-judge recommendation" time="34.8" file="${JUDGE_FILE}" line="9">`
       + `<failure type="AssertionError" message="${message.replace(/\n/g, '&#10;')}" /></testcase></testsuite></testsuites>\n`);
-    // Trimmed from census 37198445662's paid-slice-5-a1 qa-only record.
+    // Trimmed from census 37198445662's paid-slice-5-a1 qa-only record, relabeled as the remaining judge case
+    // after the standalone skill-text judges were removed.
     fs.writeFileSync(path.join(shard, '1.91.19-x-llm-judge-2026-10-04-1129.json'), JSON.stringify({ tier: 'llm-judge', total_cost_usd: 0.06, tests: [{
-      name: QA_ONLY, suite: 'Other skill evals', tier: 'llm-judge', passed: false, duration_ms: 34829, cost_usd: 0.06, execution: 'executed',
+      name: JUDGE_CASE, suite: 'llm-judge recommendation', tier: 'llm-judge', passed: false, duration_ms: 34829, cost_usd: 0.06, execution: 'executed',
       judge_scores: { clarity: 3.6666666666666665, completeness: 4.333333333333333, actionability: 3.6666666666666665 },
       judge_reasoning: '[sample 1] The bundle is thorough. Clarity suffers from extreme density and cross-file indirection. Two actionability concerns: Browser Quick allots 30 seconds.\n[sample 2] Deliverables are concrete.\n[sample 3] Execution is feasible.',
       exit_reason: 'validation_failed', error: message.replace('&gt;', '>') }] }));
     const manifestPath = path.join(dir, 'manifest.json');
     const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-    const budget = resolvePaidShardBudget(['test/skill-llm-eval.test.ts']);
-    manifest.entries.push({ file: 'test/skill-llm-eval.test.ts', slice: 1, status: 'planned', estimatedMs: 35_000, budget });
+    const budget = resolvePaidShardBudget([JUDGE_FILE]);
+    manifest.entries.push({ file: JUDGE_FILE, slice: 1, status: 'planned', estimatedMs: 35_000, budget });
     fs.writeFileSync(manifestPath, JSON.stringify(manifest));
     const slicePath = path.join(dir, 'paid-slice-1-a1', 'slice-1.json');
     const slice = JSON.parse(fs.readFileSync(slicePath, 'utf8'));
-    slice.outcomes.push({ files: ['test/skill-llm-eval.test.ts'], status: 'failed', exitCode: 1, elapsedMs: 35_000, executedTests: 1, skippedTests: 0, budget });
+    slice.outcomes.push({ files: [JUDGE_FILE], status: 'failed', exitCode: 1, elapsedMs: 35_000, executedTests: 1, skippedTests: 0, budget });
     fs.writeFileSync(slicePath, JSON.stringify(slice));
   };
 
   test('a judge red names each failing dimension, its mean, samples and rationale, its artifact and an exact one-case command', () => {
-    const r = report('gate', addJudgeRed, { GITHUB_RUN_ID: '37198445662' });
-    const line = r.out.split('\n').find(l => l.includes(`✗ ${QA_ONLY}`))!;
+    const r = report('periodic', addJudgeRed, { GITHUB_RUN_ID: '37198445662' });
+    const line = r.out.split('\n').find(l => l.includes(`✗ ${JUDGE_CASE}`))!;
     expect(line).toContain('FAIL  assertion — expect(received).toBeGreaterThanOrEqual(expected)');
     expect(line).toContain('· cause assertion  clarity 3.67 < 4 (3 samples) "Clarity suffers from extreme density and cross-file indirection."; '
       + 'actionability 3.67 < 4 (3 samples) "Two actionability concerns: Browser Quick allots 30 seconds."');
-    expect(line).toContain('evidence: paid-slice-1-a1/shards/skill-llm-eval (fetch: bun run eval:pass-rates --run 37198445662 --case \'qa-only/SKILL.md workflow\')');
-    expect(line).toContain(`after a repair: EVALS=1 EVALS_TIER=gate EVALS_JUDGE_SELECTION_JSON='{"version":1,"selected":["${QA_ONLY}"],"reason":"after a repair"}' `
-      + `bun test test/skill-llm-eval.test.ts -t '(?:^|\\s)(?:qa-only/SKILL\\.md workflow)$'`);
+    expect(line).toContain('evidence: paid-slice-1-a1/shards/llm-judge-recommendation (fetch: bun run eval:pass-rates --run 37198445662 --case llm-judge-recommendation)');
+    expect(line).toContain('after a repair: bun run scripts/test-paid-shards.ts --tier periodic --case llm-judge-recommendation');
     expect(line).not.toContain('rerun:');
-    const record = r.history.find(x => x.case === QA_ONLY);
+    const record = r.history.find(x => x.case === JUDGE_CASE);
     expect(record).toMatchObject({ failure_class: 'assertion', error: 'expect(received).toBeGreaterThanOrEqual(expected)', failure_cause: 'assertion',
       failure_detail: { judge: [expect.objectContaining({ dimension: 'clarity', mean: 3.67 }), expect.objectContaining({ dimension: 'actionability', mean: 3.67 })] } });
     expect(trialRecordProblemsV1(record)).toEqual([]);

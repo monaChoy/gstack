@@ -2,7 +2,7 @@
 name: autoplan
 preamble-tier: 3
 version: 1.0.0
-description: Auto-review pipeline — reads the full CEO, design, eng, and DX review skills from disk and runs them sequentially with auto-decisions using 6 decision principles. (gstack)
+description: Auto-review pipeline — runs the CEO, design, eng (architecture, edge cases, failure modes, tests) and DX reviews in order, auto-deciding by 6 principles. (gstack)
 triggers:
   - run all reviews
   - automatic review pipeline
@@ -67,9 +67,9 @@ If `SKILL_PREFIX` is `true` use `/gstack-*` names; paths stay `~/.claude/skills/
 
 ## Question Tuning (skip entirely if `QUESTION_TUNING: false`)
 
-Before each decision brief (AskUserQuestion or Conductor/fallback prose), choose `question_id` from `~/.claude/skills/gstack/scripts/question-registry.ts` or `{skill}-{slug}`, then run `~/.claude/skills/gstack/bin/gstack-question-preference --check "<id>"`; for an unregistered id, write the question summary to `.gstack/tmp/qt.txt` (file-write tool) and append `--summary-file .gstack/tmp/qt.txt` (one-way keyword check). `AUTO_DECIDE` means choose the recommended option and say "Auto-decided [summary] → [option] (your preference). Change with /plan-tune." `ASK_NORMALLY` means ask.
+Before each decision brief (AskUserQuestion or Conductor/fallback prose), choose `question_id` from `~/.claude/skills/gstack/scripts/question-registry.ts` or `{skill}-{slug}`, then run `~/.claude/skills/gstack/bin/gstack-question-preference --check "<id>"`; for an unregistered id, write the question summary to `.gstack/tmp/qt.txt` (file-write tool) and append `--summary-file .gstack/tmp/qt.txt` (one-way keyword check); its `--signal-keys` prints an optional signal-key hint. `AUTO_DECIDE` means choose the recommended option and say "Auto-decided [summary] → [option] (your preference). Change with /plan-tune." `ASK_NORMALLY` means ask.
 
-**Embed the question_id as a marker in every asked brief**, ad hoc IDs included, with one ID for check, marker and log. Include `<gstack-qid:{question_id}>` once in the question text itself, not only a command or log. On prose paths, use the explicit reply line. Without the marker, the PreToolUse hook treats AskUserQuestion as observed-only and never auto-decides.
+**Embed the question_id as a marker in every asked brief**, ad hoc IDs included, with one ID for check, marker and log. Include `<gstack-qid:{question_id}>` once in the question text itself, not only a command or log. On prose paths, use the explicit reply line. Without the marker the hook never auto-decides.
 
 **Embed the option recommendation via the `(recommended)` label suffix** on exactly one option per AUQ. The PreToolUse hook parses it first, falls back to "Recommendation: X" prose, and refuses when ambiguous (two labels = refuse).
 
@@ -472,7 +472,7 @@ Read skills/sections only at their triggers, never prefetch future phases. Load
 the tasks aggregator at Phase 4. Run every applicable skill and lazy section fully.
 
 **Section skip list — when following a loaded skill file, SKIP these sections
-(they are already handled by /autoplan):**
+(/autoplan handles them):**
 - Preamble (run first)
 - Scope gate (the plan under review is already the target)
 - AskUserQuestion Format
@@ -482,7 +482,8 @@ the tasks aggregator at Phase 4. Run every applicable skill and lazy section ful
 - Step 0: Detect platform and base branch
 - Review Readiness Dashboard
 - Plan File Review Report
-- Prerequisite Skill Offer (BENEFITS_FROM)
+- Prerequisite Skill Offer
+- Next Steps — Review Chaining
 - Outside Voice — Independent Plan Challenge
 - Design Outside Voices (independent)
 

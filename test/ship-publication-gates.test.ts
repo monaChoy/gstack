@@ -16,12 +16,13 @@ function writeDrafts(root: string, top = '## Summary\n\n## Documentation', rest 
 }
 const POST = resolve(import.meta.dir, '../bin/gstack-post');
 const PROSE_LINT = resolve(import.meta.dir, '../bin/gstack-prose-lint');
+const PLAIN_TITLE = resolve(import.meta.dir, '../bin/gstack-plain-title');
 
 /** The two real bins the blocks call, at the installed path under a HOME of `root`. */
 function installBins(root: string): void {
   const bin = join(root, '.claude/skills/gstack/bin');
   mkdirSync(bin, { recursive: true });
-  for (const [name, target] of [['gstack-post', POST], ['gstack-prose-lint', PROSE_LINT]] as const) {
+  for (const [name, target] of [['gstack-post', POST], ['gstack-prose-lint', PROSE_LINT], ['gstack-plain-title', PLAIN_TITLE]] as const) {
     writeFileSync(join(bin, name), `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(target)} "$@"\n`, { mode: 0o755 });
   }
 }
@@ -242,8 +243,8 @@ test('publication composes the saved documentation section unchanged and refuses
 });
 
 test('publication reports unavailable triage separately from an empty successful fetch', () => {
-  const section = template.slice(template.indexOf('## Greptile Review'), template.indexOf('## Scope Drift'));
-  expect(section).toContain('Greptile triage: UNAVAILABLE (dispatch failed)');
+  const section = template.slice(template.indexOf('## Review bot comments'), template.indexOf('## Scope Drift'));
+  expect(section).toContain('Review bot triage: UNAVAILABLE (dispatch failed)');
   expect(section).toContain('actual reason');
   expect(section).toContain('complete');
   expect(section).toContain('no_pr');

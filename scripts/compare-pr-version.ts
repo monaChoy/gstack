@@ -16,7 +16,7 @@
 // only blocks actual collisions.
 
 import { readFileSync } from "node:fs";
-import { classifyTrainHead } from "../lib/version-gate-train";
+import { classifyTrainHead } from "../crew/lib/version-gate-train";
 
 const [, , jsonPath, prNumber] = process.argv;
 if (!jsonPath) {
@@ -47,6 +47,10 @@ if (process.env.BASE_REF && process.env.HEAD_SHA) {
     }
     const entry = train.entry === "fragment" ? `its entry is ${train.fragments} CHANGELOG fragment(s)` : train.entry === "none-bot" ? "it is a bot PR with no entry (the merge step writes one from its title)" : "the CHANGELOG change is confined to [Unreleased]";
     console.log(`✓ ${tag} is unstamped under the base's ship policy: VERSION and package.json match its merge base, any changed release output is what the release tool generates at the merge base's VERSION, and ${entry}. The merge step stamps it.`);
+    process.exit(0);
+  }
+  if (train.kind === "release") {
+    console.log(`✓ ${tag} is the release stamp of its merge base: v${train.version} folds its ${train.fragments} changelog fragment(s), and everything else it changes is the stamp (docs/ship-policy.md#release-stamp).`);
     process.exit(0);
   }
   if (train.kind === "invalid") {

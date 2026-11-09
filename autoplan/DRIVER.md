@@ -17,10 +17,10 @@ Order: ceo → design → dx → eng. Design runs only with UI scope, DX only wi
 Scope flags on the first `next`: `--ui`, `--no-ui`, `--no-dx`, `--developer-tool`, `--agent-primary`, `--docs-only`. `--developer-tool` and `--agent-primary` only enable DX.
 The first `next` prints `SCOPE: ui=… (terms; visual; files) dx=… (detected) docs_only=yes|no (<s>) source=ui:<s>,dx:<s>`
 (each is `flag`, `marker` or `detected`). Docs-only (`--docs-only`, or every Implementation-plan path is README*, CHANGELOG*,
-TODOS*, docs/** but not docs/*-policy.md, or other markdown outside a skill dir) runs CEO on the native voice only, then Eng. UI needs a rendered file path or a UI term next
+TODOS*, docs/** but not docs/*-policy.md, or other markdown outside a skill dir) runs CEO on the native voice only, then Eng. UI needs a rendered file path (including a named non-test `.ts`/`.js` file that holds a tagged `html`, `css` or `svg` template, such as Lit or htm) or a UI term next
 to a visual noun in the Implementation plan. To keep flags for later runs on the same plan, add
 the `SCOPE_PIN:` marker it prints (`<!-- gstack-autoplan-scope: … -->`) as the plan's first
-line yourself; gstack never writes the plan.
+line yourself; gstack never writes the plan. **Kinds (R65), first `next` only.** `--kind fix` reviews nothing: it prints `AUTOPLAN: not needed (bug fix; R65)`, a `PROOF:` line and `GSTACK_RESULT: skill=autoplan status=skipped run=-`, writes nothing and needs no `--out` or `--plan`; the PR still carries the bug's proof, a repro on current main or a failing test written first. `--kind feature`, the default for an unattended run on Capy (`GSTACK_CAPY=1`) that names no kind, is the lean run. Its `phase_order` is `eng` alone with one native reviewer, whose prompt merges the CEO and Eng lenses (Design or DX only when scope detects them), always asks "Any outside terms, licences or rights involved?" and shows the draft code. The draft is `git diff` from the merge base with `--base <ref>` (default: `gstack-diff-scope`'s base, never an `origin/HEAD` naming the checked-out branch), untracked files included and the run directory left out, written to the snapshot as `draft.diff` and hashed; with no code yet it says `DRAFT: none (<why>)`. The first `next` prints `LEAN:` and each opened phase `DRAFT:`; the reviewer's line after INPUT must be `DRAFT: <sha256>` or `DRAFT: none`, or submit refuses it (`RESULT_RECEIPT_MISSING`). No outside voice, `--max-rounds 1`, no carry check and one gate revision: `revise --incorporates` applies the accepted changes without re-review and approves. `--full` brings back every phase and both voices; off Capy, and in an interactive session, the default stays full.
 
 ## The loop
 
@@ -38,7 +38,7 @@ line yourself; gstack never writes the plan.
 5. `REOPENED: <phases>` means loop `next` again (Eng last). `APPROVED:` means `export` (`DISPATCHES: <n> est_input_tokens=<k>`, relative).
 6. Rounds: one by default; a second only for High or Critical findings; cap 2 (`--max-rounds`). A `revise` whose decisions all resolve below
    High prints `APPLIED: <ids> without re-review (below High)`. At the cap with High open, `ESCALATE: evidence sufficient, decision needed`: relay it, never ask for another round.
-7. Carry-forward ([docs/unattended.md#carry-forward](../docs/unattended.md#carry-forward); `--no-carry-forward` on the first `next` opts out): a later gate that asks nothing new takes the owner's words from the gate before it (`CARRIED:`, then `APPROVED:`); `CARRY: no (<why>)` leaves it for the owner; `CARRY_CHECK:` means one reviewer from another model family reads the printed delta prompt, then `check --out <dir> --attempt <id> --result <file> --model <id>` (or `--unavailable "<reason>"`).
+7. Carry-forward ([docs/unattended.md#carry-forward](../docs/unattended.md#carry-forward); `--no-carry-forward` on the first `next` opts out): a later gate that asks nothing new takes the owner's words from the gate before it (`CARRIED:`, then `APPROVED:`); a plan edit that only adds plain ELI5 lines carries as K1's `autoplan-regate` no-stop (`NO_STOP:`; before /ship run `gstack-no-stop import --from <dir>/no-stop.json`); `CARRY: no (<why>)` leaves it for the owner; `CARRY_CHECK:` means one reviewer from another model family reads the printed delta prompt, then `check --out <dir> --attempt <id> --result <file> --model <id>` (or `--unavailable "<reason>"`).
 
 ### On Capy
 
@@ -57,8 +57,8 @@ line yourself; gstack never writes the plan.
 
 ### Commands
 
-- `gstack-autoplan next --out <dir> --plan <plan.md> [scope flags] [--light] [--spend-cap <usd>] [--max-rounds <n>] [--estimate-usd <n>] [--scaffold]`
-  first call: init the run, print PHASE:, SCOPE:, DRIVER: and one ATTEMPT: per voice; --max-rounds caps review rounds per phase (default 2 unattended); a run with --spend-cap, in any session kind (or any unattended Capy run), reserves 5.00 per voice for each attempt, so the cap binds; --estimate-usd <n> sets that reservation and the run keeps it for later phases.
+- `gstack-autoplan next --out <dir> --plan <plan.md> [--kind feature|--full] [--base <ref>] [scope flags] [--light] [--spend-cap <usd>] [--max-rounds <n>] [--estimate-usd <n>] [--scaffold] [--ceo-only]`
+  first call: init the run, print PHASE:, SCOPE:, DRIVER: and one ATTEMPT: per voice; --kind feature (the default for an unattended Capy run) is the lean run above and prints LEAN: and DRAFT:, --full keeps every phase and voice, and `next --kind fix` alone (no --out or --plan) reviews nothing and ends `status=skipped run=-`; --max-rounds caps review rounds per phase (default 2 unattended); a run with --spend-cap, in any session kind (or any unattended Capy run), reserves 5.00 per voice for each attempt, so the cap binds; --estimate-usd <n> sets that reservation and the run keeps it for later phases; --ceo-only (command line only, never a scope marker) reviews CEO alone and ends `status=reviewed` with `<dir>/ceo-review.md` (`REVIEWED:`): no gate, and the gate verbs refuse it (`CEO_ONLY_NO_GATE`).
 - `gstack-autoplan run --out <dir> --plan <plan.md> --native-model <id> --outside-model <id> --native-runner api --runner api [--max-tokens <n>] [--spend-cap <usd>]`
   hosts without subagents: one command calls both models directly (ANTHROPIC_API_KEY, OPENAI_API_KEY) and loops next/submit to the gate; a response cut off at the output limit is reported truncated, so raise --max-tokens (default 16384 for both providers; OpenAI counts reasoning tokens toward it); each api call reserves its priced worst case (a model with no price reserves the per-voice default under a cap), a native call that went out but bound no result settles at its usage, or its full reservation when the usage is unknown, and a failed outside call stays counted at its reservation.
 - `gstack-autoplan next --out <dir> [--redispatch <attempt>]`
@@ -86,7 +86,7 @@ line yourself; gstack never writes the plan.
 - `gstack-autoplan export --out <dir>`
   write the artifact set; then `gstack-artifact validate <dir>/run.json`.
 - `gstack-autoplan export --out <dir> --public <pub>`
-  a machine-path-free copy to commit or share (recorded roots rewritten, plan.md code kept, provenance digests); the private run is not touched; then `gstack-artifact validate --public <pub> --private <dir>/run.json` on this machine.
+  a machine-path-free copy to commit or share (recorded roots rewritten, plan.md code kept, provenance digests) without the owner's own words (every owner_reply the run recorded, carried words and a human's deferral reason dropped, quotes and gstack's renderings of them redacted; refused when one sits in plan.md code); the private run is not touched; then `gstack-artifact validate --public <pub> --private <dir>/run.json` on this machine.
 - `gstack-autoplan status|resume --out <dir>`
   read the manifest (PENDING: lines name open attempts); take ownership after a crash (EXECUTION_UNKNOWN lists unfinished attempts).
 - `gstack-autoplan resume --out <new dir> --from <checkpoint>`
@@ -148,7 +148,7 @@ is the completion check. Copy the whole directory, never single files.
 
 ## Coordinator contract (inherited by every lane)
 
-Merge conditions. A lane's PR merges only when: the required gate lanes are green on the stamped tree or the tree receipt says `gate-reuse: eligible`; `gstack-lane-check` reports `clear` for its planned files against every other open lane; the PR body opens with the `gstack-ship-receipt` block; and the coordinator, not the lane, says merge. A lane never merges, rebases another lane, or force-pushes.
+Merge conditions. A lane's PR merges only when: the required gate lanes are green on the stamped tree or the tree receipt says `gate-reuse: eligible`; `gstack-lane-check` reports `clear` for its planned files against every other open lane; the PR body carries the `gstack-ship-receipt` block in its Agent notes section; and the coordinator, not the lane, says merge. A lane never merges, rebases another lane, or force-pushes.
 
 Behavior-change notices. Every user-visible behavior change outside the plan's own items is listed in the PR body under `## Behavior changes` with the file, the old behavior and the new one, before the review starts. An omitted change found in review is a CRITICAL finding, whatever its size.
 

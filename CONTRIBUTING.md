@@ -191,8 +191,10 @@ the new defaults.
 | Run one free test file while repairing | `bun test <file>` | Free, seconds | Never bare `bun test` for the suite |
 | Run full free acceptance before publishing | `bun run test` | Free, a few minutes | Bun 1.4.2 |
 | Run the full free suite from a small machine | `bun run test:ubicloud` | Free suite on a billed 16-vCPU VM, about 5 minutes | `UBICLOUD_API_KEY`, `UBI_OWNER` |
-| Clear pregate's test tier on a machine under 8 cores ([remote gate](docs/pregate.md#remote-gate)) | `gstack-pregate --stage tests --remote --spend-cap 2 --timeout 2700 --allow-repo-commands` (same command keyed or keyless) | Keyed: one billed 16-vCPU VM, about 7 minutes and $0.06 for the whole free tier, worst case $0.38; keyless: free, local parallel shards, practical for small selections only (98 files took 103 s on 4 cores) | Keyed: `UBICLOUD_API_KEY`, `UBI_OWNER`; keyless: nothing |
-| Run the curated Windows-safe subset | `bun run test:windows` (CI: six `windows-latest` jobs, nightly on main; PRs run the shorter `windows-smoke` check) | Free | Windows, Git Bash |
+| Clear pregate's test tier on a machine under 8 cores from CI, the default on gstack ([CI carry](docs/pregate.md#ci-carry)) | push, `gstack-ci-carry wait --base main`, then `gstack-pregate --allow-repo-commands` (a branch behind main first runs `gh workflow run free-tests.yml --ref <branch>`) | Free; reuses the green Free Tests run at your pushed tree | Pushed branch, `gh` |
+| Clear pregate's test tier on a machine under 8 cores when no CI run covers your tree ([remote gate](docs/pregate.md#remote-gate), opt-in) | `gstack-pregate --stage tests --remote --spend-cap 2 --timeout 2700 --allow-repo-commands` (same command keyed or keyless) | Keyed: one billed 16-vCPU VM, about 7 minutes and $0.06 for the whole free tier, worst case $0.38; keyless: free, local parallel shards, practical for small selections only (98 files took 103 s on 4 cores) | Keyed: `UBICLOUD_API_KEY`, `UBI_OWNER`; keyless: nothing |
+| Run the curated Windows-safe subset | `bun run test:windows` (CI: six `windows-latest` jobs, nightly on main; PRs run the shorter `windows-smoke` check, and a PR that touches path, file-name or process code also runs its changed Windows-safe test files in `Windows Scoped Tests`) | Free | Windows, Git Bash |
+| Rerun chosen Windows-safe test files on Windows CI | `gh workflow run windows-scoped-tests.yml --ref <branch> -f files='<file> <file>'` (pick files from `bun run test:windows --list`) | Free CI runners | Pushed branch, `gh` with workflow rights |
 | Refresh the Windows duration seed | `gh workflow run windows-free-tests.yml --ref <branch> -f record_durations=true`, then commit the `free-test-durations-windows` artifact | Free CI runners | Pushed branch, `gh` with workflow rights |
 | Run a native Windows qualification campaign | `gh workflow run native-qualification.yml --ref <branch> -f mode=<mode>` ([modes](docs/TESTING_INTERNALS.md#windows-free-lane)) | Free CI runners | Pushed branch, `gh` with workflow rights |
 | Preview which paid cases my diff selects | `bun run eval:select` (PR profile; `--profile full` for the plain touchfile selection) | Free | — |
@@ -206,11 +208,12 @@ the new defaults.
 | Validate periodic cases plus the weekly gate census on a branch | `gh workflow run evals-periodic.yml --ref <branch> -f include_gate_census=true` | CI runners + API spend | Pushed branch, `gh` with workflow rights |
 | Run the opt-in ML, gitleaks and Swift checks | `gh workflow run platform-qualification.yml --ref <branch>` | Free CI runners | Pushed branch, `gh` with workflow rights |
 | Render one module loadout as an eval arm ([loadouts](docs/loadouts.md)) | `bin/gstack-modules render --host claude --modules full,-section:<skill>/<id> --out-dir <dir>` (`--loadout full` for the control) | Free, about a second per host | Bun 1.4.2 |
+| See which loadout a model gets, or publish it as Capy would ([loadouts](docs/loadouts.md#how-gstack-picks-a-loadout)) | `bin/gstack-modules resolve --model <id>`; `bin/gstack-modules install --model <id> --full-root ~/.claude/skills --store <dir>` | Free, under a second | Bun 1.4.2 |
 | Look at past local eval runs | `bun run eval:list` / `eval:compare` / `eval:summary` | Free | Local eval history |
 | See a case's pass rate across recent weekly runs | `bun run eval:pass-rates --case <case-id>` | Free | `gh` with repo read access |
 | Measure one red case alone against the ship bar (MEETS 9/10) | `bun run scripts/ship-measure.ts measure --case <case-id> --round baseline` ([bar](docs/TESTING_INTERNALS.md#ship-measure)) | API spend for 10 trials (12 for behavior); asks above $2/trial, stops at $25/case | Same as paid coverage |
 | Measure main's flakiest gate cases (the weekly sweep) | `gh workflow run eval-sweep.yml --ref main [-f k=5] [-f cap_usd=150] [-f dry_run=true]`, or locally `bun run scripts/ship-measure.ts sweep --dry-run` ([sweep](docs/TESTING_INTERNALS.md#ship-measure-sweep)) | API spend up to $150 per 7 days (`ship_measure_sweep_budget_usd`); `--dry-run` is free | `gh` with repo read access; CI dispatch needs workflow rights |
-| Replay what the paid gate costs and what each selection or train policy would have cost ([replay](docs/TESTING_INTERNALS.md#replay-gate-cost)) | `bun run scripts/gate-cost-replay.ts --runs <full-gate run ids> --since <date> --until <date>` (screening figures print as screen-provisional, heuristic until T2 lands) | Free; `gh` reads, cached in `.context/gate-cost-cache` | `gh` with repo read access |
+| Replay what the paid gate costs and what each selection or train policy would have cost ([replay](docs/TESTING_INTERNALS.md#replay-gate-cost)) | `bun run crew/scripts/gate-cost-replay.ts --runs <full-gate run ids> --since <date> --until <date>` (screening figures print as screen-provisional, heuristic until T2 lands) | Free; `gh` reads, cached in `.context/gate-cost-cache` | `gh` with repo read access |
 | See the audit success metrics and weekly health | `bun run test:health [--since-days 7] [--json] [--enforce]` | Free; 5–20 minutes of `gh` reads | `gh` with repo read access |
 
 Old command names are listed under [Retired commands](#retired-commands).
@@ -255,7 +258,7 @@ never credentials, private payloads or an entire unreviewed agent transcript.
 |------|--------------|---------------|
 | 1 — Static | `bun run test` (free) | Command validation, snapshot flags, Aside contract pins, render-wrapper option mapping, SKILL.md correctness, TODOS-format.md refs, observability unit tests |
 | 2 — E2E | The sharded paid runner (`bun run eval:bg:pr`, `eval:bg:release`) | Full skill execution via `claude -p`, PTY and Agent SDK sessions |
-| 3 — LLM eval | The same runner; `test/skill-llm-eval*.test.ts` | LLM-as-judge scoring of generated SKILL.md docs |
+| 3 — LLM judge | Inside paid cases, through `test/helpers/llm-judge.ts` | A model scores what a paid run produced |
 
 Pick commands from [Which command do I run?](#which-command-do-i-run).
 
@@ -316,9 +319,7 @@ then spend one paid run with the line's `after a repair:` command. A red census
 on `main` is reported on the weekly tracking issue; a census dispatched on a
 branch writes the same report to its run summary and `census-report` artifact.
 
-CI enables verified first-attempt reuse for 16 workflow quality judges for
-24 hours within the same PR. The cookie workflow's custom input and the other 11
-quality cases stay fresh. PR-profile E2E shards that run once (no retry, so the
+Quality judges always run fresh. PR-profile E2E shards that run once (no retry, so the
 pass is provably a first attempt) reuse a pass from the same PR when every
 consumed input is byte-identical: the test's import closure, every tracked file
 its registered cases' touchfiles and the global touchfiles match, the runner and
@@ -428,10 +429,10 @@ eval files, and misses the strict classifier. No API keys needed.
 - **Generator tests** (`test/gen-skill-docs.test.ts`) — Tests the template system: verifies placeholders resolve correctly, output includes value hints for flags (e.g. `-d <N>` not just `-d`), enriched descriptions for key commands (e.g. `is` lists valid states, `press` lists key examples), and that a template's `codex_default_prompt:` frontmatter key reaches the Codex `agents/openai.yaml` `default_prompt` (a template without the key keeps `Use <name> for this task.`) while no host's SKILL.md render carries the key.
 - **Design detector, catalog, and DESIGN.md** (`test/gstack-design-detect.test.ts`, `test/design-detect-contract.test.ts`, `test/design-catalog.test.ts`, `test/design-checklist-sync.test.ts`, `test/design-md.test.ts`, `test/frontend-scope.test.ts`, `test/impeccable-fixtures.test.ts`) — Drive `bin/gstack-design-detect.ts` through the fake engine in `test/fixtures/fake-impeccable.ts` (probe order, the never-execute-a-repository-file rule, the `--changed` target allow-list, `design_detector: off`, analytics lines, output sanitizing), pin the catalog invariants and the generated `review/design-checklist.md`, round-trip the open DESIGN.md reader/writer, and check the real engine captures (`test/fixtures/impeccable-*.json`, engine 0.1.3) against the contract. `test/dom-dump-hygiene.test.ts` runs `lib/dom-dump.js` in a real Chromium page through the built browse binary; it self-skips without the binary and is opt-in outside CI (`GSTACK_DOM_DUMP_HYGIENE=1`).
 - **Tier-alignment invariant** (`test/e2e-tier-alignment.test.ts`) — For every self-gated `test/skill-e2e-*.test.ts` named in a touchfiles dep list, the file's `EVALS_TIER` self-gate must match its declared tier in `E2E_TIERS`. Kills the "inert demotion" class where a test is re-tiered in `touchfiles.ts` but the file still gates on the old tier and keeps running in the wrong lane. Unmapped or mixed-tier files are reported, never silently skipped.
-- **Catalog budget** (`test/catalog-budget.test.ts`) — Caps the aggregate discovery surface: the sum of every skill's frontmatter `name` + `description` (what every host loads at discovery, every session) must stay under 1,423 token-equivalents, with a 260-byte per-skill cap. Counting goes through the shared census in `test/helpers/skill-census.ts` (physical files vs authored skills vs registry entries — three deliberately different counts). Adding a skill? The failure message carries the re-measure + ratchet protocol.
+- **Catalog budget** (`test/catalog-budget.test.ts`) — Caps the aggregate discovery surface: the sum of every skill's frontmatter `name` + `description` (what every host loads at discovery, every session) must stay under 1,452 token-equivalents, with a 260-byte per-skill cap. Counting goes through the shared census in `test/helpers/skill-census.ts` (physical files vs authored skills vs registry entries — three deliberately different counts). Adding a skill? The failure message carries the re-measure + ratchet protocol.
 - **Context-budget ratchet** (`test/context-budget-ratchet.test.ts`) — CI ceilings on the two token ledgers the catalog budget doesn't cover: the always-on full-frontmatter aggregate and each skill's per-invocation eager tokens (SKILL.md + forced-read references), graded against `test/fixtures/context-budget.json` via `lib/context-bill.ts`. New skills fail until they have a ceiling; ceilings for removed skills must be pruned. Legitimate growth or a landed reduction: re-run `bun test/helpers/capture-context-budget.ts` and commit the refreshed fixture in the same commit, so the change is a visible decision in the diff.
 - **Skill-to-bin drift ratchet** (`test/skill-bin-drift.test.ts`) — `scripts/skill-bin-drift.ts` statically reads every gstack bin call in skill templates, carved sections, references and the Claude-host renders (it never executes a bin) and fails with `DRIFT_UNKNOWN_BIN` or `DRIFT_UNKNOWN_FLAG` at file:line when a skill names a bin missing from `bin/` or a flag that bin's parser does not accept. Known misses live in `test/fixtures/skill-bin-drift-allowlist.json`, which only shrinks: a new finding fails, and so does an entry that no longer reproduces. Check one skill with `bun run scripts/skill-bin-drift.ts --skill <name>`; bins with permissive parsers or no usage text are reported, never failed.
-- **Dependency security regressions** (`test/dependency-security.test.ts`) — Run `bun test test/dependency-security.test.ts` to check the resolved `sharp` and `adm-zip` version floors, load Sharp, verify ordinary ZIP extraction, and reject extraction through destination-file and destination-directory symlinks. The symlink cases skip Windows. These checks complement the OSV scan; they do not change its existing exceptions.
+- **Dependency security regressions** (`test/dependency-security.test.ts`) — Run `bun test test/dependency-security.test.ts` to check the resolved `sharp`, `adm-zip`, `qs` and `@hono/node-server` version floors, load Sharp, verify ordinary ZIP extraction, and reject extraction through destination-file and destination-directory symlinks. The symlink cases skip Windows. These checks complement the OSV scan; they do not change its existing exceptions.
 
 ### Tier 2: E2E via `claude -p`
 
@@ -550,23 +551,19 @@ Artifacts are never cleaned up — they accumulate in `~/.gstack-dev/` for post-
 
 ### Tier 3: LLM-as-judge
 
-Uses `claude-fable-5-1` by default to score generated SKILL.md docs on three dimensions.
-Override the judge model per run with `GSTACK_EVAL_MODEL_JUDGE`:
+No test asks a model to grade skill text. The judges that remain score what an
+agent produced, inside their own paid cases (for example
+`test/llm-judge-recommendation.test.ts` and the outcome judges in the QA and design
+E2E files). Facts that several skills must state the same way are checked for free
+instead, for example `test/review-bot-history-facts.test.ts`.
 
-- **Clarity** — Can an AI agent understand the instructions without ambiguity?
-- **Completeness** — Are all commands, flags, and usage patterns documented?
-- **Actionability** — Can the agent execute tasks using only the information in the doc?
-
-Each dimension is scored 1-5 by a panel of 3 samples of the same prompt, drawn
-concurrently; each dimension's panel median (at least 2 of 3 samples) must meet
-that judge's threshold (≥ 4 for most dimensions; see each case). An erroring sample fails the panel. There's also a regression test that compares generated docs against the hand-maintained baseline from `origin/main` — generated must score equal or higher.
-
-Needs `ANTHROPIC_API_KEY` in `.env`. The judge files run in every paid lane
-(`bun run eval:bg:pr` selects the ones your diff touches).
-
-- Resolves the judge model through `lib/eval-model.ts`, using the override order above
-- Tests live in `test/skill-llm-eval.test.ts`
-- Calls the Anthropic API directly (not `claude -p`), so it works from anywhere including inside Claude Code
+The judge model defaults to `claude-fable-5-1`; override it per run with
+`GSTACK_EVAL_MODEL_JUDGE` (resolved through `lib/eval-model.ts`, using the override
+order above). Each scored dimension is a panel of 3 samples of the same prompt, drawn
+concurrently; each dimension's panel median (at least 2 of 3 samples) must meet that
+case's threshold. An erroring sample fails the panel. Needs `ANTHROPIC_API_KEY`.
+`test/helpers/llm-judge.ts` calls the Anthropic API directly (not `claude -p`), so it
+works from anywhere including inside Claude Code.
 
 ### Paid-test touchfiles
 
@@ -811,6 +808,7 @@ Write or change skill prose with `/write-skill` (edit ladder, levels, `gstack-sk
 3. The dynamic template discovery picks it up for every host render and for `gstack/llms.txt`. Two things it does not fill in: a row in `SKILL_REQUIREMENTS` in `lib/doctor-components.ts` (the doctor's `--for <skill>` table; `test/doctor-components.test.ts` fails on a skill directory without one, and the same gen run rerenders `bin/gstack-doctor-components.sh`), and the catalog rows readers find the skill through (README.md, AGENTS.md, `docs/skills.md`, `docs/PROJECT_STRUCTURE.md`, the root `SKILL.md.tmpl` router)
 4. Budget it: run `bun test/helpers/capture-context-budget.ts` and commit the refreshed `test/fixtures/context-budget.json` — the context-budget ratchet fails any skill without a ceiling; the catalog budget (`test/catalog-budget.test.ts`) fails until its cap is ratcheted by the protocol in its failure message, and the number is quoted in CLAUDE.md, this file and `docs/CONTRIBUTOR_REFERENCE.md`
 5. Commit `{skill}/SKILL.md` (and the generated `{skill}/sections/preamble.md` when the template's `preamble-tier` is 2 or higher), external host output is generated at setup time and gitignored
+6. Give it a row in the evidence ledger, `docs/inventory/evidence.json` ([ETHOS.md: 9. Earn Its Place](ETHOS.md#9-earn-its-place)): evidence that it helps on frontier models (`sources`, `models`, `prompt: preset`, `scope`, `masked: true`, and `caveats` for any limits on the result), or `status: untested` with its `reason`, a concrete `plan` (a `test/fixtures/skill-evals/<skill>/tasks.json` or an /eval-plan preregistration), an `owner` and a `measure_by` date. `test/inventory.test.ts` fails on a skill without a valid row; `bin/gstack-inventory --check` names the problem, and `bin/gstack-inventory` refreshes the dated snapshot in `docs/inventory.md`
 
 ## Conductor workspaces
 
@@ -917,7 +915,11 @@ This affects all projects. To revert: `git checkout main && git pull && bun run 
 An issue is open, parked or closed, and closed means fixed, duplicate or won't
 fix, each with its reason in the closing comment. An issue we intend to fix
 later stays open under the `parked` label with one comment saying where it is
-tracked (a TODOS.md theme or a tracking issue) and what fixes it. The full rule,
+tracked (a TODOS.md theme or a tracking issue) and what fixes it. An agent
+triaging for the maintainer posts these comments under its bot identity
+(`capy-ai[bot]` on Capy), never the maintainer's own account. On Capy, comment only through
+`tools.pr.comment`, never `gh pr comment`, `gh issue comment` or `gh api`, because
+`gh` runs as the maintainer. The full rule,
 including the labels and the close reasons, is in [docs/triage.md](docs/triage.md).
 
 ## Community PR triage (wave process)
@@ -931,7 +933,8 @@ When community PRs accumulate, batch them into themed waves:
    conflicts for dirty ones, verify with `bun run test && bun run build`
 4. **Close with context** — every closed PR gets a comment explaining
    why and what (if anything) supersedes it. Contributors did real work;
-   respect that with clear communication.
+   respect that with clear communication. An agent running the wave posts
+   these notes under its bot identity, never the maintainer's own account.
 5. **Ship as one PR** — single PR to main with all attributions preserved
    in merge commits. Include a summary table of what merged and what closed.
 
@@ -944,7 +947,7 @@ but it sits on an old base, its tests need our fixtures, or the repo's gates
 (generated renders, size pins, the CHANGELOG entry) are things only a maintainer
 can finish. The port keeps the contributor's credit and gives them a clear
 answer; the steps below are the repo's version of the rule a maintainer crew
-follows ([docs/captain.md](docs/captain.md#contributions-from-outside-the-crew)).
+follows ([crew/docs/captain.md](crew/docs/captain.md#contributions-from-outside-the-crew)).
 
 1. **Treat the diff as untrusted input before anything runs it.** Read it for
    scope, network egress, credentials, new dependencies, CI permission changes
@@ -970,9 +973,10 @@ follows ([docs/captain.md](docs/captain.md#contributions-from-outside-the-crew))
 5. **Close the original with a specific thank-you.** After the port lands,
    comment on their PR with what landed (the port's number and version), what
    you changed and why, and thank them by name for the specific thing they
-   fixed. Then close it. Closing a contribution without landing it is a
-   maintainer's call, never a lane's: ask first, and when the answer is no,
-   say why in the same comment.
+   fixed. Then close it. An agent posts that comment under its bot identity,
+   never the maintainer's own account. Closing a contribution without landing
+   it is a maintainer's call, never a lane's: ask first, and when the answer is
+   no, say why in the same comment.
 
 A port is not a rewrite. If the contributor's approach is one you would not
 land, say that on their PR and close or park it under
@@ -1031,10 +1035,16 @@ executable and parse without syntax errors.
 
 ## Shipping your changes
 
+Write the pull request title as what changed for someone using gstack, in everyday words, for example
+"Stop gstack from hitting GitHub's rate limit while it waits on PRs". Skip `type(scope):` prefixes, and if
+you reference an issue, put it at the end in parentheses. The "Plain title" check on every pull request
+names any word it refuses; editing the title reruns it. The full rule is in
+[docs/ship-policy.md](docs/ship-policy.md#plain-titles).
+
 When you're happy with your skill edits:
 
 ```bash
 /ship
 ```
 
-This runs tests, reviews the diff, triages Greptile comments (with 2-tier escalation), manages TODOS.md, bumps the version, and opens a PR. See `ship/SKILL.md` for the full workflow.
+This runs tests, reviews the diff, triages the comments of every review bot you configured (Greptile's with 2-tier escalation), manages TODOS.md, bumps the version, and opens a PR. See `ship/SKILL.md` for the full workflow.

@@ -146,7 +146,9 @@ record. Another successful fetch alone cannot certify corrupted history.
 
 Outside reviews send your diff, plan or question to a second AI provider. Their
 verdict comes from `lib/outside-review-result.ts`, which prints
-`VERDICT: clean|findings|unverified|unavailable`. A `findings` verdict with a
+`VERDICT: clean|findings|unverified|unavailable`. When given an events file, it
+also prints `OUTSIDE_USAGE:` with the token counters Codex reported, or
+`OUTSIDE_USAGE: unknown` when it reported none. A `findings` verdict with a
 P0 or P1 finding blocks exactly like a native P0/P1. `unverified` and
 `unavailable` are missing coverage: /ship and /review continue, show the gap in
 the readiness dashboard and the PR body, and never count it as a pass.
@@ -177,26 +179,49 @@ the readiness dashboard and the PR body, and never count it as a pass.
   A reply whose last `Verdict:` line says `not ready` is `findings` and exits
   3 even when readable advisory severities (P2 or P3) were parsed; `FINDINGS:`
   names the highest one. A not-ready reply with no readable severity still
-  prints `FINDINGS: unspecified` and exits 3.
-- **No findings.** A review with no tag and no label is `clean` only when its
-  conclusion says so: the last sentence (or its last ", and" clause), or the
-  `because` clause of its `Recommendation:` line, opens with `NO_FINDINGS`,
-  "No issues found", "I found no actionable regressions" or "I did not find
-  any bugs", with no "but", "however", "except", "other than" or "elsewhere".
-  When other prose comes first, anything after that statement except a
-  predicate ("were found", "is evident") or a colon explanation must scope it
-  to the change as a whole ("in this change", "in the staged changes"); "No
-  issues in the parser." does not conclude the review. A "no issues" phrase
-  anywhere else in the reply does not count. Otherwise the review is
-  `unverified` (see below), never `clean`. A `/codex` consult
-  answer with no severity labels at all is not a review summary and stays
-  `clean`.
+  prints `FINDINGS: unspecified` and exits 3. A last `Verdict:` line that is
+  not an approval (`ready`, `LGTM`, `approve`, `ship it`, `pass`, `clean`,
+  `good to go`, or exactly `NO_FINDINGS`), such as `Can't verify`, `blocked`,
+  `revise` or an empty one, or an approval that says something was excluded,
+  blocked, skipped, not run, not executed or could not be verified (or "not
+  yet", or holds a `?` such as `Ready? No`), is
+  [`unverified`](#outside-review-unverified-verdict), never `clean`. Inline
+  code in the verdict is blanked like any other quote, so write the verdict as
+  plain text: `Verdict: \`ready\`` is unverified. Only a line that starts
+  with `Verdict:` (after optional bold, a heading mark or a bullet) is read; a
+  verdict under a bare `Verdict` heading, after `>`, or as `Overall verdict`
+  is not.
+- **Numbered findings.** In a reply with a `Verdict:` line, every numbered item
+  at the start of a line (`1. x`, `1. **Nonblocking — x**`) is a finding,
+  unless the reply ends with `VERDICT: CLEAN`. When one has no readable
+  severity, `FINDINGS:` prints `unspecified` instead of `none` (here and in
+  `gstack-outside-voice run`); the verdict still comes from the rules above.
+- **The verdict line.** The review and structured gates read `clean` only
+  from the reviewer's last line, exactly `VERDICT: CLEAN` or
+  `VERDICT: FINDINGS`, alone on the reply's last non-empty line and outside a
+  code fence (bold, inline code or a list marker around the whole line is
+  fine). Every outside-review prompt asks for it. Prose is never evidence for
+  `clean`: a reply without that line is
+  [`unverified`](#outside-review-missing-verdict) however plainly it says it
+  found nothing ("No issues found in the diff."), because each prose rule
+  gstack tried let some reply that named a problem pass. A P0 or P1 finding (or
+  a Critical or High label) or a last `Verdict: not ready` still makes the
+  review `findings` whatever the line says, and an earlier
+  `VERDICT: FINDINGS` line makes a closing `VERDICT: CLEAN`
+  [`unverified`](#outside-review-unverified-verdict). With only P2 or P3
+  findings the review passes under either value and `FINDINGS:` names the
+  highest one. `VERDICT: FINDINGS` with no readable severity is
+  [`unverified`](#outside-review-unverified), and under `VERDICT: CLEAN`
+  numbered items are not counted as findings. The `spec` gate reads its
+  `SCORE:` and `AMBIGUITIES:` lines instead, and a `/codex` consult or
+  challenge answer is checked only for whether it ran.
 - **Design proposals** (the design-direction voices in /design-consultation
   and /office-hours) are read with the `proposal` gate: a completed proposal
   needs only its `Recommendation: ... because ...` line.
 
 Outside-review prompts ask the reviewer to label each finding Critical, High,
-Medium or Low, so most reviews land on `findings` or `clean`.
+Medium or Low (or P0-P3) and to end with the verdict line, so most reviews
+land on `findings` or `clean`.
 
 <a id="sourced-helper-location"></a>
 ### `gstack: cannot load gstack-codex-probe` / `gstack: cannot locate <helper> (shell: ...)` / `CODEX_MODE: helper_unavailable`
@@ -332,19 +357,36 @@ it; `gstack-outside-voice run` sends that default to Anthropic only.
 ### `... outside review unavailable: the response lacks the markers this gate requires (...)`
 
 **Meaning.** The answer did not contain what the gate checks: a
-`Recommendation: ... because ...` line, a `SCORE:`/`AMBIGUITIES:` pair, or
-severity tags.
+`Recommendation: ... because ...` line (or a `## Recommendation` heading whose
+next non-blank line is a plain sentence with a `because` reason), a
+`SCORE:`/`AMBIGUITIES:` pair, or severity tags.
 
 **Fix.** Re-run the review.
 
 **Expected result.** `OUTSIDE_STATUS: completed`.
 
+<a id="outside-review-missing-verdict"></a>
+### `... outside review: ran, verdict unverified (the review does not end with the required VERDICT line)`
+
+**Meaning.** The reviewer finished, but its last line is not exactly
+`VERDICT: CLEAN` or `VERDICT: FINDINGS`. gstack reads a pass only from that
+line, never from prose such as "No issues found", so the review is
+`unverified` ([how the verdict is read](#outside-review-verdict)). Replies
+from skills rendered before the line existed land here too.
+
+**What is kept.** The full answer is shown above, and any P0 or P1 finding in it
+still blocks.
+
+**Fix.** Read the output above and decide; it is not a pass, and /ship and
+/review list it as missing coverage. Re-run the review from current skills
+(`./setup` re-renders them), whose prompts ask for the line.
+
 <a id="outside-review-unverified"></a>
 ### `... outside review: ran, verdict unverified (...)` / `OUTSIDE_STATUS: unverified` / `GATE: UNVERIFIED`
 
-**Meaning.** The review completed but had no severity tag or label and gave
-no explicit no-findings conclusion, so no pass or fail can be read from it
-([how the verdict is read](#outside-review-verdict)).
+**Meaning.** The review reports findings, or ends with `VERDICT: FINDINGS`, but
+no finding carries a readable severity tag or label, so no pass or fail can be
+read from it ([how the verdict is read](#outside-review-verdict)).
 
 **What is kept.** The full answer is shown above.
 
@@ -377,6 +419,33 @@ bun lib/outside-review-result.ts --verdict execution reply.md
 
 **Expected result.** `VERDICT: findings` or `VERDICT: clean` with a P0-P3
 `FINDINGS:` value, and no `UNPARSED:` line.
+
+<a id="outside-review-unverified-verdict"></a>
+### `... outside review: ran, verdict unverified (the reviewer's own verdict does not say the change is ready (Verdict: ...))` / `REASON: unverified_verdict`
+
+**Meaning.** The reply's last `Verdict:` line is neither an approval nor
+`not ready`, for example `Verdict: Can't verify (one changed file excluded
+...)`, or it approves but also says something was excluded, blocked, skipped,
+not run or could not be verified, or asks a question. The
+reviewer did not say the review finished and found the change ready, so gstack
+does not count it as `clean`. The quoted verdict is in parentheses. Besides
+the approvals, only the exact `NO_FINDINGS` token counts as a clean verdict.
+
+A `/codex` consult or challenge answer whose verdict picks an option
+(`Verdict: go with B`, `Verdict: Proceed with the plan`) is `unverified` on
+purpose: a consult is advice, not a pass/fail review, so there is no pass to
+report. Read the answer itself; an answer with no verdict line stays `clean`.
+
+**What is kept.** The full reply is shown above.
+
+**Fix.** Read the verdict and the reply, and decide; it is not a pass. Fix
+what the verdict names (a file left out of the review, a suite that could not
+run), then re-run the review. To re-check a saved reply, run
+`bun lib/outside-review-result.ts --verdict execution reply.md` from your
+gstack checkout.
+
+**Expected result.** `VERDICT: clean` or `VERDICT: findings` with a last
+verdict that approves the change or says `not ready`.
 
 <a id="codex-model-unusable"></a>
 ### `CODEX_MODE: model_unusable` / `MODEL_UNUSABLE`
@@ -570,6 +639,9 @@ the base has moved.
 **Meaning.** The working tree changed between the pass's `gstack-review-log --start` and
 its logged row: an edit, commit or merge landed while reviewers were still reading. The
 reviewers may not have seen that change, so the row's `review_binding.state` is `changed`.
+Review records fingerprint with `gstack-wtree --review`, which skips untracked root dot-folders
+that hold no tracked file (never `.github/` or `.gstack/`), so a test lane's scratch folder alone
+does not move the tree.
 Step 11.5 cannot bind it and inserts `9 → 10 → 11 → 11.5`. Logging the same results again
 cannot repair it.
 
@@ -582,6 +654,49 @@ fix-check record as Step 9's. Rerun Step 11's native pass on the same frozen tre
 
 **Expected result.** `gstack-review-read` shows both records at one tree with
 `review_freshness` `CURRENT`, and Step 11.5 continues to Step 12.
+
+<a id="ship-preflight-run-open"></a>
+### `STOP: /ship run <id> is open on this checkout and past its preflight (<marker>; open until its finish or for 120 minutes) ...`
+
+**Meaning.** A full `gstack-ship-preflight` (Steps 1-3) ran on a checkout where a
+/ship run already passed them and has not finished. A full preflight merges the
+base into the working tree, and that run's review readers diff this tree, so the
+merge would void their pass (gbrain-evals#317). /ship passes `--run <id>` (Step 1:
+the preamble's `SESSION_ID`; `ship/DRIVER.md` Phase 2: the run dir's name). Once
+Steps 1-3 succeed, preflight records the run in the checkout's git dir
+(`gstack-ship-run`) and opens it on the checkout's own lease
+(`<git dir>/gstack-leases`, so the driver needs no workflow lease). The run
+counts as open while the marker exists, which `gstack-ship-release finish` removes
+when Steps 15-16 pass, and while `bin/gstack-lease open` says so: under 120
+minutes old and its holder (the harness that ran preflight) alive. A finished,
+aged-out or dead run never blocks, and /ship's own first preflight (or a rerun
+after a Step 3 STOP) is never refused. A different `--run` from the open run's
+holder replaces it: that is a new /ship after one that stopped before finish.
+The holder is the first non-shell process above preflight: the Claude Code
+session, or on Capy the machine's one `capy-server`, so there only the same id or
+a missing `--run` is refused. The same id, no `--run`, or an open run held by
+another live process (another session) stops.
+
+**What is kept.** Nothing ran: no fetch, no merge, the tree is untouched.
+
+**Fix.** Rerun Step 5 with `gstack-ship-preflight --tests-only`, which never
+merges, or let that /ship finish. If that run is no longer running (it stopped
+before finish), remove the marker the STOP names (`rm <marker>`), then rerun.
+
+**Expected result.** The preflight continues to `STATUS:` and `MERGE:`.
+
+<a id="ship-preflight-run-unrecorded"></a>
+### `STOP: cannot record /ship run <id> on this checkout's lease (...)`
+
+**Meaning.** `--run` was given, but `gstack-lease touch` could not open the run
+on the checkout's lease, for example while a live process holds its lock.
+Unrecorded, a later full preflight could not be refused, so preflight stops
+before the fetch instead of going on unprotected.
+
+**What is kept.** Nothing ran: no fetch, no merge.
+
+**Fix.** Do what the parenthesized `gstack-lease` line names (wait for the
+process holding `<git dir>/gstack-leases/.lock`), then rerun.
 
 <a id="review-fingerprint-tmpdir"></a>
 ### `gstack-wtree: cannot create a temp index under <dir>; set TMPDIR to a writable directory` / `gstack-review-log: cannot create a private object directory under <dir>; no working-tree fingerprint. Set TMPDIR to a writable directory.`
@@ -617,7 +732,7 @@ plan; the audit is `not run`.
 <a id="plan-eng-review-not-persisted"></a>
 ### `PERSISTED: no` / `PERSIST: gstack-review-log '{...}'` / `no saved Eng Review: run the PERSIST: line ...`
 
-**Meaning.** /plan-eng-review ran where the caller forbids writes (for example
+**Meaning.** The eng review methodology (`/autoplan`'s eng phase) ran where the caller forbids writes (for example
 a delegating agent keeps the reviewer read-only, so it cannot edit the plan it
 judges). The review completed: it ends `DONE` with `PERSISTED: no`, records
 telemetry `success`, and returns the full report and decision ledger in its
@@ -635,7 +750,7 @@ review-log command with this review's values.
 ~/.claude/skills/gstack/bin/gstack-review-log '{"skill":"plan-eng-review",...}'
 ```
 
-Or rerun /plan-eng-review where it may write its report and log.
+Or rerun /autoplan where it may write its report and log.
 
 **Expected result.** `gstack-review-read` lists the `plan-eng-review` entry and
 /ship's dashboard shows the Eng Review row (CLEAR when its status is `clean`).
@@ -880,7 +995,11 @@ pick a new `--output`), then copy the recovery file to where you want it.
 **Meaning.** On Codex, Factory, OpenCode, Cursor, Copilot and Kiro every bash
 block finds gstack on its own: an exported `GSTACK_ROOT` (with `bin/` and
 `lib/`), then a repo-local install, then the host's global install
-(`$CODEX_HOME/skills/gstack` on Codex). None existed.
+(`$CODEX_HOME/skills/gstack` on Codex). None existed. A skill installed for one
+folder (Hermes, or the Codex install `./setup` writes) is the exception for its
+first block: that block runs the folder's own `bin/gstack-skill-start` and
+ignores an exported `GSTACK_ROOT`. When the folder is missing, the block prints
+this line and its start command then fails.
 
 **Fix.**
 
@@ -1034,7 +1153,7 @@ refusal line, and later auto-updates go through.
 `/bin/sh`, and a hook that does not parse exits 2, which blocks the tool call
 it guards in every session. Setup parse-checks every hook it registers and
 every hook a skill's frontmatter runs (`/autoplan`, `/careful`, `/freeze`,
-`/guard`, `/investigate` and `/plan-ceo-review`): the shim, the gstack shell
+`/guard` and `/plan-ceo-review`): the shim, the gstack shell
 helpers it sources (such as `careful/bin/hook-extract.sh` and
 `bin/gstack-state-root.sh`), and the TypeScript it runs with its local imports.
 A merge conflict marker line in any of those files fails as `unresolved merge
@@ -1570,6 +1689,26 @@ user-namespace error needs `GSTACK_CHROMIUM_NO_SANDBOX=1`; then re-run
 `<checkout>/bin/gstack-browser-ensure`. `--with-browser` on the installer
 front-loads the install on machines that want it now.
 
+<a id="chromium-sandbox-unavailable"></a>
+### `Chromium could not start its sandbox: this Linux host does not let unprivileged users create user namespaces …`
+
+**Meaning.** Chromium aborted with `No usable sandbox!` (its own line is
+printed below gstack's). The host denies unprivileged user namespaces: stock
+Ubuntu 23.10+ under AppArmor, a container's seccomp profile, or
+`user.max_user_namespaces=0`. browse prints it after `Server failed to
+start:`, and `gstack-design-build preflight` prints it as
+`DESIGN_BUILD: unrendered code=BROWSER_SANDBOX`. gstack never turns the
+sandbox off on its own: it already does so for root, CI, `CONTAINER` and
+Docker's `/.dockerenv`, and everywhere else that is your call.
+
+**Fix.** Either allow unprivileged user namespaces (on Ubuntu,
+`sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` or an
+AppArmor profile for Chromium, per the link in Chromium's line; elsewhere,
+raise `user.max_user_namespaces`), or set `GSTACK_CHROMIUM_NO_SANDBOX=1` in
+the shell that runs gstack. Use the variable only for pages you trust: without
+the sandbox, a page that exploits a Chromium bug can reach your files and
+accounts. Then rerun.
+
 <a id="capy-install-preflight-failed"></a>
 ### `gstack-capy-install: preflight: <tool> not found (INSTALL_PREFLIGHT_FAILED; ...)`
 
@@ -1610,11 +1749,23 @@ the row is a WARN and the trailer stays `gstack: ok` with a `floor=<f>
 (<file>)` note and a `fix:` note; only the supported minimum
 (`REVISION_BELOW_MINIMUM`) fails a session for being old.
 
-**Fix.** Run the fix before the first workflow: on Capy, `bash
+The row compares the version this checkout reads policies as, the same one
+`validatePolicy` uses: VERSION, or the newest policy key the checkout knows
+when that is later, so an unstamped main checkout that already reads the
+floor's keys passes (`installed <v>, reads policies as <r>`).
+
+When the floor is also above the newest stable gstack release, the row says
+`and no release meets this floor yet: the newest stable gstack is <s>` and
+offers no fast-forward, and the trailer note is `floor=<f> (<file>; no release
+meets this floor yet)` with no `fix:`: upgrading cannot clear it.
+
+**Fix.** Run the fix once before the first workflow: on Capy, `bash
 <skill>/scripts/install.sh --for <skill>` fast-forwards a clean checkout to
 origin and reinstalls in one step (`SELF_UPGRADE: done`); elsewhere
-`bin/gstack-upgrade`. If the floor is above gstack's latest release, lower it
-in the project.
+`bin/gstack-upgrade`. If the row says no release meets the floor, run nothing:
+the project lowers `min_gstack_version` to the stable release named
+(`gstack-ship-policy validate` refuses a floor above stable,
+[POLICY_FLOOR_ABOVE_STABLE](#policy-floor-above-stable)).
 
 <a id="project-node-pin-unmet"></a>
 ### `WARN pins — node <v> outside <pin> (<file>); node read from <path> (node pin only; bun pins pass); fix: ... (PROJECT_NODE_PIN_UNMET)`
@@ -1638,7 +1789,8 @@ yourself; or change the pin in the project.
 **Meaning.** An install-mode session start above the supported minimum found
 the checkout behind origin and could not fast-forward it: the checkout is
 dirty, diverged or pinned (`UPGRADE_REFUSED`), another live session holds a
-lease (`UPGRADE_BUSY`), `bin/gstack-upgrade` is missing, or the session is a
+lease or a /ship or review run is open on the state root (`UPGRADE_BUSY`,
+[deferred](#upgrade-busy)), `bin/gstack-upgrade` is missing, or the session is a
 `--for review-voice` reviewer, which never moves a checkout a lane may share
 (`UPGRADE_SKIPPED`). Nothing was changed, the doctor certified the installed
 revision, and the trailer stays `gstack: ok` with the notes above: a gap
@@ -1650,6 +1802,26 @@ landed upstream), clear the named cause and run the fix: `bin/gstack-upgrade`
 after the refusal is resolved, or the Capy skill installer again once the
 lease holder finishes. Below the supported minimum the bootstrapper fails
 `revision` instead (`REVISION_BELOW_MINIMUM`).
+
+<a id="pin-unreasoned"></a>
+### `SELF_UPGRADE: pin overridden (<pin>, with no recorded reason, and the oldest commit this checkout lacks is <h>h old; ...) (PIN_UNREASONED)` / trailer note `stale=<h>h`
+
+**Meaning.** Capy threads run gstack's latest main at least daily (R75). A Capy
+session start in install mode (`--for <skill>`, a workflow boundary) found the
+checkout more than 24 hours behind origin's default branch, by the commit time
+of the oldest commit it lacks, and pinned by `GSTACK_CAPY_SELF_UPGRADE=off`,
+`GSTACK_CAPY_AUTO_UPGRADE=0`, a detached HEAD (`--revision`) or another branch,
+with no recorded reason. It checked out the default branch where needed and
+fast-forwarded. A dirty or diverged checkout is still never moved, and a live
+workflow lease, eval run or open /ship or review run still defers the upgrade
+(`UPGRADE_BUSY`). On
+`--check` the trailer carries `stale=<h>h` with the install as its fix; unlike a
+bare `behind=`, run that fix before the first workflow.
+
+**Fix.** Nothing, when the pin was not deliberate. To keep a pin, record why:
+`GSTACK_PIN_REASON=<why>` in the session's environment, or
+`git -C <checkout> config gstack.pinReason "<why>"`; the trailer then reads
+`stale=<h>h (pinned: <why>)` and the checkout stays where it is.
 
 <a id="upgrade-refused"></a>
 ### `gstack-upgrade: <cause>; nothing was changed; fix: <command> (UPGRADE_REFUSED)`
@@ -1696,10 +1868,20 @@ session holds a workflow lease on this installation: pid <p> (<age>m
 <checkout>/bin/gstack-upgrade once the lease is 120 minutes old, or
 GSTACK_UPGRADE_FORCE=1 <checkout>/bin/gstack-upgrade when no other session uses
 this checkout (UPGRADE_BUSY))` and leaves the
-checkout where the run started. Each `gstack-skill-start` renews the lease.
+checkout where the run started. Each `gstack-skill-start` renews the lease
+and opens a run that its `gstack-skill-end` closes; a lease whose runs are all
+closed is idle and never counts (GST-1205).
+A run open on the state root defers the Capy install-mode upgrade whatever
+its lease's age (GST-1677): `SELF_UPGRADE: deferred (/ship run <id>
+(<ledger>) is open on this machine, so gstack stays at <version> until it
+ends (R75: upgrades wait for the workflow boundary); fix: <install> once the
+run ends (UPGRADE_BUSY))`, for a ship-budget ledger with no `closed_at`
+written in the last 6 hours, or `review run <token> (<file>)` for a review
+start under 120 minutes old that `gstack-review-log --finish` has not
+consumed.
 
 **Fix.** Wait for those sessions to finish (`bin/gstack-lease list` shows
-every lease with its age and `alive|dead|stale`; a holder is named as
+every lease with its age and `alive|idle|dead|stale`; a holder is named as
 `pid <p> (<age>m <command>)`), then re-run `bin/gstack-upgrade`. For the
 session's own run, or a shared-harness lease, re-run once the lease is 120
 minutes old. When you know no other session uses the checkout, `GSTACK_UPGRADE_FORCE=1 bin/gstack-upgrade`
@@ -1842,8 +2024,17 @@ The guide is `capy/skill/gstack/captain.md`.
 `--by`), holds a value outside its enum (`--outcome approved|rejected|pending|standing`,
 a `--date` that is not a real `YYYY-MM-DD` day) or exceeds a length cap (ask, scope and
 pending 300 characters, words 2,000). Exit 2. Nothing was written.
+`rule` and `lane-exception` refuse with this code too: a `--head` that is not
+a commit in the repository, a reason that is missing or holds a newline or
+control character, a `--by` naming gstack, any record while this checkout
+holds an open /ship run, and for `lane-exception` a `--files` list that is
+empty or holds whitespace. `add` refuses a `ruled_note` or
+`test_lane_exception` scope ([ruled notes](ship-policy.md#ruled-notes),
+[test-lane exceptions](ship-policy.md#test-lane-exceptions)).
 
-**Fix.** Rerun with every required flag inside the caps the line names.
+**Fix.** Rerun with every required flag inside the caps the line names. A
+ruling or a test-lane exception is the owner's: record it from the owner's
+session, outside the lane's /ship run.
 
 <a id="approval-record-secret"></a>
 ### `gstack-approvals: ... (APPROVAL_RECORD_SECRET)`
@@ -1946,6 +2137,78 @@ all the command prints `SHOT_PNG: unavailable (...)` and exits 0 instead.
 
 **Fix.** Screenshot `shot.html` with your own browser at 880 px wide, or use `text.md`.
 
+<a id="plan-record-missing"></a>
+### `PLAN: ... (PLAN_RECORD_MISSING)`
+
+**Meaning.** The PR body has no `Plan:` line, so the PR reads as `Plan: required`
+(crew/docs/captain.md, Plan before build). gstack never guesses from the diff, title or
+changelog whether a change is a feature. Under `plan_record: warn` (the Capy crew default)
+`gstack-ship-queue ready` prints the line and continues; under `require` it refuses.
+
+**Fix.** Copy the brief's Plan line into the PR body:
+`gstack-approvals render --plan "Plan: approved: <run id>"` (or `exempt: bug fix (R65)`) prints it
+under `## Approvals`. A PR whose only changes are changelog fragments needs no line.
+
+<a id="plan-unresolved"></a>
+### `PLAN: ... (PLAN_UNRESOLVED)`
+
+**Meaning.** `Plan: approved: <token>` names no approval row on this machine. A run id must
+match a row source `autoplan:<id>@gate_rev=<n>` in any branch's file of the repository's
+approval store (the state root plus every Drive mirror); a row id must exist and be a plan
+approval, not a `ruled_note`, `review_loop_grant` or `test_lane_exception` row. A public
+repo's `Plan: approved (record r-<id>)` must hash from a row id this machine can read; when it
+is the redacted Approvals block's own id (a hash of a whole record), the message says so.
+
+**Fix.** `gstack-approvals import --autoplan <run dir> --by "<owner>"` after the owner's answer,
+or `gstack-approvals add` with their exact words for a plan approved outside /autoplan, then
+cite the run id or the row id it printed. For a record id, paste the Plan line
+`gstack-approvals render --plan` printed, and run ready where the plan was approved or after
+`gstack-approvals sync`.
+
+<a id="plan-not-approved"></a>
+### `PLAN: ... (PLAN_NOT_APPROVED)`
+
+**Meaning.** The line says `required`, the newest gate revision's row for the cited run is
+pending or rejected, or the gate was answered in an agent's own words (`--words-by`, shown
+as "its own decision (not the owner's words)"). A lane approving its own plan is the skip
+this check exists to catch (GST-1751).
+
+**Fix.** Relay the gate to the owner through the Captain, answer it with their exact words
+(`gstack-autoplan answer … --owner-reply "<words>"`), import it, and cite the run.
+
+<a id="plan-exempt-unknown"></a>
+### `PLAN: ... (PLAN_EXEMPT_UNKNOWN)`
+
+**Meaning.** `Plan: exempt: <reason>` names a reason outside the list: `bug fix`, `s1`,
+`flaky`, `stamp`, `changelog-resolve`, `cap-repin`, `audited-list`, `read-only`,
+or `crew:<rule>` for an exemption a crew's rules file records. A trailing
+parenthetical such as `(R65)` is ignored. A diff of changelog fragments only needs
+no line.
+
+**Fix.** Use the exemption the brief names. A change none of them covers is a feature
+and needs `Plan: required` and a plan run.
+
+<a id="plan-store-unavailable"></a>
+### `PLAN: ... (PLAN_STORE_UNAVAILABLE)`
+
+**Meaning.** The line cites an approval, but this machine has no approval store: no
+state-root `approvals/` directory and no Drive mirror. That is reported apart from a
+missing row, because nothing could be read.
+
+**Fix.** Run `gstack-ship-queue ready` on the lane machine that imported the approval, or
+`gstack-approvals sync` there. `land` checks the plan record `ready` wrote into the READY
+note and does not need the store.
+
+<a id="queue-plan-mismatch"></a>
+### `gstack-ship-queue land: ... (QUEUE_PLAN_MISMATCH)`
+
+**Meaning.** Under `plan_record: require`, land found a READY note with no plan record
+(written before the key, or by a `ready` that refused nothing in warn mode), or a note
+whose Plan line differs from the PR body's current line.
+
+**Fix.** The lane fixes the PR body's Plan line if needed and reruns
+`gstack-ship-queue ready --pr <n>` at the pin.
+
 ## /ship token budget and fresh-context handoffs (gstack-ship-budget)
 
 The flow, the BUDGET line field by field and the meters are in [ship-budget.md](ship-budget.md).
@@ -1995,7 +2258,9 @@ of the same epoch, `--prior-reading` or `--dispatched-at` is above `--reading`, 
 reads its own source (Claude Code journals, the estimate). Exit 2; nothing changed.
 
 **Fix.** Pass the counter the run started with (the BUDGET line names meter, unit and epoch).
-A different meter opens a new epoch that keeps prior usage:
+A successor thread's counter opens a new epoch that keeps prior usage:
+`gstack-ship-budget resume --run <id> --meter-source <its jam id> --reading <n> --credits <c>`
+([Successor handoff](ship-budget.md#successor-handoff)). A different meter opens one too:
 `gstack-ship-budget resume --run <id> --meter <m>`.
 
 <a id="budget-meter-unavailable"></a>
@@ -2018,7 +2283,8 @@ the path, the schema version and the parse location. Exit 2.
 
 **Fix.** After a machine change, `gstack-ship-budget resume --run <id>` restores the ledger and
 record from the Drive checkpoint. Otherwise rebuild:
-`resume --record <path> --rebuild-from-record --reading <n>`; open reservations are charged as unknown.
+`resume --record <path> --rebuild-from-record --reading <n>`, plus `--credits <c>` when the run
+metered credits (every `ship/DRIVER.md` run does); open reservations are charged as unknown.
 
 <a id="budget-check-skipped"></a>
 ### `gstack-review-log: ... (BUDGET_CHECK_SKIPPED)` / `gstack-ship-budget: ... role=<r> step=<s> started=<t> spend=unknown (BUDGET_CHECK_SKIPPED)`
@@ -2080,8 +2346,8 @@ browse chain 'goto https://example.com | text'
 <a id="browse-chromium-path-failed"></a>
 ### `Chromium at GSTACK_CHROMIUM_PATH=<path> failed to launch: ...`
 
-**Meaning.** Headless browse and make-pdf now use `GSTACK_CHROMIUM_PATH`
-(NixOS, macOS 13). That binary could not start.
+**Meaning.** Headless browse, headed browse, `browse handoff` and make-pdf use
+`GSTACK_CHROMIUM_PATH` (NixOS, macOS 13). That binary could not start.
 
 **Fix.** Point `GSTACK_CHROMIUM_PATH` at a working Chromium, or
 `unset GSTACK_CHROMIUM_PATH` to use gstack's bundled one.
@@ -2179,6 +2445,78 @@ context, is gone too, so browse could not open a tab to run the command.
 command again.
 
 **Fixed in.** The first release after v1.91.101.0 (#3167).
+
+<a id="browse-session-invalid"></a>
+### ``browse: the session name is not 1-64 letters, digits, dots, colons, underscores or dashes ("<name>"); fix: pick a name like agent-1 ... (BROWSE_SESSION_INVALID)``
+
+**Meaning.** `BROWSE_SESSION` or `--session` holds a name browse will not use
+as a tab owner.
+
+**Fix.** Use a short name such as `agent-1`. An empty `BROWSE_SESSION=` turns
+sessions off and uses the shared active tab.
+
+<a id="browse-session-root-only"></a>
+### ``browse: only the local root token may name a session ... (BROWSE_SESSION_ROOT_ONLY)``
+
+**Meaning.** A paired or scoped agent sent a session name. Sessions are for
+local agents that share the root token; scoped agents already get their own
+tabs.
+
+**Fix.** Run `newtab` and pass the returned `tabId` on every command.
+
+<a id="browse-session-tab-reset"></a>
+### ``browse: this session's tab was closed ... (session <name>'s tab <id> was closed; it was on <url>); fix: open the page again ... (BROWSE_SESSION_TAB_RESET)``
+
+**Meaning.** The tab this session was working in is gone: someone ran
+`closetab` on it, closed the window, or it sat idle past
+`BROWSE_SESSION_IDLE_MINUTES` (default 120). browse refuses reads instead of
+answering from a blank page.
+
+**Fix.** `browse goto <url>` in the same session opens a new tab for it, then
+`snapshot` again before using `@refs`.
+
+<a id="browse-session-limit"></a>
+### ``browse: every session slot is running a command ... (BROWSE_SESSION_LIMIT)``
+
+**Meaning.** `BROWSE_MAX_SESSIONS` sessions (default 16) are all mid-command,
+so browse could not close an idle one to open a tab for a new session.
+
+**Fix.** Retry in a moment, or raise `BROWSE_MAX_SESSIONS`.
+
+<a id="browse-device-unknown"></a>
+### ``browse: no Playwright device has that name, so nothing on the tab changed ("<name>"; nearest: ...); fix: $B device --list (BROWSE_DEVICE_UNKNOWN)``
+
+**Meaning.** `$B device <name>` matches names from Playwright's `devices`
+table, case-insensitively. The name you gave is not in it, so the tab was not
+touched. The line lists the three nearest names.
+
+**Fix.** `$B device --list` prints every name; quote names with spaces
+(`$B device "iPhone 15"`). Add `--landscape` for the rotated profile.
+
+**Fixed in.** The first release after v1.92.61.0 (#3058).
+
+<a id="browse-device-cdp-failed"></a>
+### ``browse: Chromium refused a device emulation call on this tab (<method>: <error>; the tab is partly emulated); fix: $B device off (BROWSE_DEVICE_CDP_FAILED)``
+
+**Meaning.** Phone emulation is three DevTools calls on the tab's own session
+(size, touch, user agent). One failed; the line names it and says whether the
+calls before it already changed the tab.
+
+**Fix.** `$B device off` clears all three, then try the device again. If it
+keeps failing, the tab or browser is gone: `$B restart`.
+
+**Fixed in.** The first release after v1.92.61.0 (#3058).
+
+<a id="browse-touch-no-device"></a>
+### ``browse: touch input needs a phone profile on this tab first ($B tap on this tab); fix: $B device "iPhone 15" (BROWSE_TOUCH_NO_DEVICE)``
+
+**Meaning.** `tap`, `swipe`, `pinch` and `touch` send real touch events,
+which pages only see on a touch device. The current tab has no phone profile.
+
+**Fix.** `$B device "iPhone 15"` (or any name from `$B device --list`) on
+the same tab, then repeat the touch command.
+
+**Fixed in.** The first release after v1.92.61.0 (#3058).
 
 ---
 
@@ -2355,7 +2693,10 @@ default `fetch-depth: 1`), a remote branch never fetched
 first parent is missing from a shallow history. The tool never guesses a
 base, because an empty diff against a wrong or absent base would read as "no
 gate edits" and pass review. `gstack-diff-scope` prints `SCOPE_ERROR=no_base`
-(all flags false, exit 2) for the same cause.
+(all flags false, exit 2) for the same cause, and also when no base was given
+and none resolves because `origin/HEAD` names the checked-out branch (or its
+upstream, or HEAD's own commit) and no PR base, live remote HEAD, `origin/main`
+or `origin/master` resolves (its comment line says so).
 
 **Fix.** Run the command the line prints. It is built for this checkout:
 `git fetch origin +<branch>:refs/remotes/origin/<branch>` for an unfetched
@@ -2516,12 +2857,24 @@ case with `bun run eval:pass-rates --headroom --case <id>`.
 <a id="cost-unknown"></a>
 ### `cost unknown (no billing captured for any of <N> trial(s))` / `cost $<x> known + <N> of <M> trial(s) cost unknown`
 
-**Meaning.** PTY and Codex sessions record no billing, so their cost is
-unknown. So is a trial in a multi-case shard whose result records are named by
-a display label rather than the case id, because no record can be attributed
-to it (a one-case shard's records are its case's). Only the known sum is
-shown. A train verdict's `ATTEMPT:` line reports the same as `cost=$<x> known
-+ <n> of <m> case(s) cost unknown`, a bare `cost=$<x>` only when every case
+**Meaning.** Some trials' cost was not captured, so only the known sum is
+shown. A trial is cost-unknown when it ran a PTY session whose transcript
+could not be priced (a non-hermetic or resumed launch, the native
+AskUserQuestion capture, two new transcripts for one cwd, no transcript or
+usage, or a model with no price row), a
+Codex session that completed no turn or whose model has no price row, a
+`claude -p` session that ended without a result, or an aborted Agent SDK
+session whose streamed usage could not be priced (no usage, or a model with no
+price row). A PTY or aborted Agent SDK session that does price counts its
+`streamed_cost_usd` instead. A trial is also unknown when no record and no
+session can be attributed to it, for example a multi-case shard's
+display-label record without `cost_case_id` (a one-case shard's records are
+its case's); a model-free case (`timeline-event-flow`) is a known $0. A panel
+trial (`behavior`, `judge`) is unknown whenever any of its sessions billed
+nothing, even one with a priced `streamed_cost_usd`. The rules are in
+[Failure causes and details](TESTING_INTERNALS.md#failure-causes). A train
+verdict's `ATTEMPT:` line reports the same as `cost=$<x> known + <n> of <m>
+case(s) cost unknown`, a bare `cost=$<x>` only when every case
 in the train record is priced, and no cost at all when none is.
 
 **Fix.** None needed; this is informational.
@@ -2608,6 +2961,8 @@ exempt wherever they appear, so there the finding means the quad is not a
 release of this repository (or the post ran outside the checkout).
 
 **Fix.** Write it as `version: 1.2.3.4`, `"version": "..."` or `v1.2.3.4`.
+A gstack release named right after `gstack` (`gstack 1.94.4.0`, the install
+check's `gstack: ok 1.94.4.0 for=ship`) is exempt too, but only for majors 0 to 2.
 MEDIUM findings do not block pushes.
 
 <a id="redact-run-id-as-phone"></a>
@@ -2621,7 +2976,23 @@ exact tokens it finds in these positions:
 
 - a 12-digit value right after `tree`, `gated_tree`, `head` or `predecessor`
   with `=` or a space (`tree=704992822996`, `tree 704992822996`);
+- an all-digit sha right after `review_loop_grant` or `review_loop_exception`
+  with a space, `=` or `:` (`review_loop_grant 367120488513`), so the owner's
+  grant records through `gstack-approvals add`. The scanner itself exempts it
+  (`isReviewLoopSha` in `lib/redact-patterns.ts`), and only that position
+  counts: the same digits elsewhere, or a number with a `+`, spaces or dashes
+  after the token, still report;
 - an 11-digit id inside an `/actions/runs/<id>` URL or as that link's text;
+- any id inside an `actions/runs/<id>` path, with or without a host, when
+  `actions/runs/` starts the line or follows whitespace, `/`, `(`, `[`,
+  `<` or a quote (`see actions/runs/41629861820`; `sales-actions/runs/…`
+  is not one), and every 11- or 12-digit id of a `runs=<id>/<attempt>` list
+  a CI carry or run clear prints (`runs=41629861819/1,41629861820/2`;
+  `run=` too). The scanner itself exempts both (`isCiRunIdentifier`), and
+  only that shape counts: each id needs its `/<attempt>` of one to three
+  digits, so `runs=4155550123`, `runs=4155550123/1`,
+  `runs=+14155550123/1` and a phone number elsewhere on the line still
+  report (GST-1227);
 - an 11-digit id right after a run word on the same line, with an optional
   `:`, `#` or `=` between: `run`, `runs`, `screen`, `screens`, `gate`,
   `gates`, `backstop`, `bisect`, `rerun`, `dispatched`, `dispatch`,
@@ -2665,20 +3036,30 @@ same-titled section (title compared case-insensitively), the
 rewrite replaces only the receipt, sections the file does not rewrite stay in
 place, and new sections are appended after them. The text above the first
 `## ` heading belongs to the file when the file is a full post: a
-receipt block above its first `## ` section, as /ship composes it. Then the current body's text there (the opening lines, and
-any lines between the receipt and the first heading, or the whole body when it
-has no `## ` heading) is replaced by the file's own text above its first
-heading, or dropped when the file has none. A partial post (`## ` sections
+receipt block above its first `## ` section, as /ship composes it. Then any
+lines between the current receipt and the first heading are replaced by the
+file's own text under its receipt, or dropped when the file has none. The
+opening text above the first receipt or heading (a paragraph, a bot's badge
+such as `<!-- capy-badge:start -->…<!-- capy-badge:end -->`, or the whole
+body when it has no `## ` heading) is kept byte for byte, and a new receipt
+lands right under it; only opening lines the file brings of its own replace
+it (GST-1227). A Capy badge that ends the body after its first receipt or
+heading (`<!-- capy-badge:start -->` through `<!-- capy-badge:end -->`, outside
+a code fence, with only blank lines after it) is a piece of its own: it stays
+at the end when the section above it is rewritten, new sections go above it,
+and a badge only the file brings goes last, once. Every other marker block, a
+badge with text after it and an unclosed badge marker stay inside the section
+they sit in. A partial post (`## ` sections
 with no receipt above them, such as a lane posting `## Screenshots`) and a
 file with no `## ` section (a receipt-only or text-only post) leave that text alone, so a human
-intro or a `Review-loop exception:` line under the receipt survives; only
-opening lines the file brings of its own replace the PR's opening lines. One stderr line names what was replaced, kept, added
+intro or a `Review-loop exception:` line under the receipt survives. One stderr line names what was replaced, kept, added
 and dropped, a dropped piece with its first line, or with that line withheld
 when the redaction scan flags it (`gstack-post: pr-body merged
-by section: replaced What changed; kept ship receipt, Why, Approvals; added
-Tests; dropped leading text ("Draft from gh pr create")`). A body file holding
-only its first section therefore no longer wipes the rest of the PR, and an
-old intro no longer sits above a fresh /ship body.
+by section: replaced ship receipt, What changed; kept leading text, Why;
+added Tests; dropped trailing text ("Old note under the receipt")`). A body
+file holding only its first section therefore no longer wipes the rest of the
+PR, and a stale note no longer sits under a fresh receipt. To retire an old
+intro, post the whole body with `--replace` or bring new opening lines.
 The redaction scan runs on the merged bytes, so a MEDIUM or HIGH finding can
 come from a kept section; the `RULE:` line's `LINE:` is in the merged text.
 When the current body cannot be read (`gh pr view --json body` fails) nothing
@@ -2930,6 +3311,71 @@ table above and end each error line with a code in parentheses. The policy
 file is described in [docs/ship-policy.md](ship-policy.md); the queue flow in
 [docs/ship-policy.md#stamp-at-merge](ship-policy.md#stamp-at-merge).
 
+<a id="route-bounded-refused"></a>
+### `ROUTE_BOUNDED_REFUSED: <path> <reason> (fix: …)`
+
+**Meaning.** `gstack-ship-release finish` found a post-review edit of a
+bounded kind (audit prose, a `.gstack/pregate.json` lane change, or a
+declared bookkeeping file) that failed one of its proofs, so the path stays
+behavior and finish stops for Steps 5–11.5
+([review-policy.md#bounded-post-review-edits](review-policy.md#bounded-post-review-edits)).
+The reason names the failed proof: `needs --reviewed-base`, `changed <n>
+lines since review (at most 20)`, `is binary or unreadable`, `carries a
+hunk the gate scan tagged`, `could not be gate-scanned`, `is not a doc the Step 14.5 audit snapshot
+recorded`, `is not the bytes the post-audit snapshot recorded (edited after
+the audit)`, `does not parse at both the reviewed and the current tree`,
+`loosens the reviewed policy: <what>`, `changes <key>; a lanes edit changes
+only dependencies`, `adds no lane`, or `is a gate path or under .gstack/ or
+.github/, never bookkeeping`.
+
+**Fix.** Do what the line's `fix:` says. Rerun finish with the merge base
+saved with the reviewed tree. Restore the audited bytes, or the mapping a
+lane change removed (a `[]` declaration lands on the base first). Or take
+Steps 5–11.5 for the edit. Never shrink an edit to get under the cap by
+moving its lines into another file.
+
+<a id="route-mechanical-refused"></a>
+### `ROUTE_MECHANICAL_REFUSED: <path> <reason>`
+
+**Meaning.** `gstack-ship-release finish` found a post-review edit to a path
+the base policy's `mechanical_retake` declares (the constant's file, a fixture
+field or a golden) that failed its proof, so the path keeps its old route,
+usually behavior ([ship-policy.md#mechanical-retake](ship-policy.md#mechanical-retake)).
+The reason names the failed proof: `needs --reviewed-base`, `is a gate path
+or under .gstack/ or .github/`, `does not hold exactly one line matching
+<template> at <side>`, `the reviewed branch did not take the constant`,
+`retakes <a> as <b>, not above the reviewed <a> and the base's <c>`,
+`changes more than the declared values since review`, `its constant <path>
+is not a proven retake`, `does not hold the same number of <field> lines`,
+`writes <v> into <field> where it held <w>, not the constant's <a> → <b>`,
+`changes no <field> value`, or `does not regenerate byte-identically from
+<regen id> (<status>)`.
+
+**Fix.** Keep the retake to the declared values: undo any other edit in those
+files (or ship it through Steps 5–11.5), write the constant's new value into
+every changed field, and rerun the regen entry's command and commit its output.
+A behavior STOP that remains is planned with `gstack-review-plan --post-review`.
+
+<a id="route-sidecar-refused"></a>
+### `ROUTE_SIDECAR_REFUSED: <path> <reason>`
+
+**Meaning.** `gstack-ship-release finish` found a `.uid` file changed after
+review that failed a Godot UID sidecar proof, so it keeps its old route,
+usually behavior ([ship-policy.md#uid-sidecar](ship-policy.md#uid-sidecar)).
+The reason names the failed proof: `needs --reviewed-base`, `could not be
+compared with the reviewed range`, `has no sibling <path> that the reviewed
+range added or modified or the review-loop exception accepted`, `has no
+sibling <path> at the current tree`, `existed at the reviewed tree or the
+current base`, `is not a regular non-executable file (mode <mode>)`, `is not
+exactly one Godot uid://<id> line`, `shares its UID with <paths>`, `could not
+be searched for its UID in the current tree`, or `or its sibling matches the base
+policy's review_exclude_paths or readers.forbid_paths`.
+
+**Fix.** Commit the sidecar exactly as Godot wrote it, beside a script this PR
+added or changed: one `uid://<id>` line, a regular file, no symlink. Keep a
+script's existing UID instead of regenerating it. Otherwise take Steps 5–11.5
+for the file.
+
 <a id="policy-source-unavailable"></a>
 ### `policy source unavailable — fix: git fetch origin <base> --depth=1 (POLICY_SOURCE_UNAVAILABLE)`
 
@@ -3022,10 +3468,12 @@ nothing.
 <a id="repo-commands-not-allowed"></a>
 ### `repo commands not executed (pass --allow-repo-commands) (REPO_COMMANDS_NOT_ALLOWED)`
 
-**Meaning.** The policy declares a command (`release_tool`), and the tool was
-run standalone. File presence never authorizes execution: outside `/ship` and
-`/land-and-deploy` a repo-declared command runs only with
-`--allow-repo-commands`. The commands were listed and nothing was written.
+**Meaning.** The policy declares a command (`release_tool`, or
+`land.merged_checks` for `gstack-ship-queue land --pin` on a stale base), and
+the tool was run without consent. File presence never authorizes execution:
+outside `/ship` and `/land-and-deploy` a repo-declared command runs only with
+`--allow-repo-commands`. The commands were listed and nothing was written or
+merged.
 
 **Fix.** Pass `--allow-repo-commands` when you mean to execute the repo's
 code (you already do when you run its tests), or drop the release tool.
@@ -3226,10 +3674,190 @@ for an older PR, write it once by hand with the same command.
 **Meaning.** The block exists but does not validate against the `ship-receipt`
 schema (`gstack-artifact schema ship-receipt`). `gstack-ship-receipt write`
 also refuses with this code, and writes nothing, when `--head` is not the
-checked-out HEAD: the receipt binds the tree the review read.
+checked-out HEAD: the receipt binds the tree the review read. It refuses the
+same way when the head touches money, gate, auth or secret code and no done
+targeted record covers those classes (`REVIEW_TARGETED: … verdict=missing|failed`),
+or when `--review-targeted` names a read commit that is not an ancestor of
+HEAD, or after which a change carries a targeted class (money, gate, auth or
+secret code changed after the targeted reader read it, a test edit the gate
+scan tags included), or whose product patch is not the receipt's and the change
+since it is more than plain docs. The change since the read is the PR's own: a
+base merge after the read that leaves the PR's diff alone never voids the record,
+whatever files it brought in (GST-1593). A release stamp after the read (a path whose
+change is a stamp under the base policy's stamp rule) always carries the record
+(GST-1689). A docs-only change after the read carries the
+record only when it changes no binary file, adds no numeric claim, touches no
+results, prereg or eval path, and names no money, security, secret or auth topic; any other docs change
+needs the reader again (GST-1195). With `--body`, write also refuses, writing
+nothing, a body that does not carry each line the receipt requires as one line,
+word for word: every `Ruled note: …` line `gstack-approvals rulings` prints,
+finish's `MECHANICAL:` lines as `Mechanical retake: …`, and accept's
+`TEST_LANE_EXCEPTION:` lines as `Test-lane exception: …`
+([ruled notes](ship-policy.md#ruled-notes),
+[test-lane exceptions](ship-policy.md#test-lane-exceptions)).
 
 **Fix.** Regenerate it with `gstack-ship-receipt write`; never hand-edit the
-block. For the `--head` refusal, check out that commit and write there.
+block. For a missing body line, add the line the refusal quotes to the body and
+write again. For the `--head` refusal, check out that commit and write there. For a
+targeted refusal, run the targeted reader on HEAD, `gstack-review-dispatch verify
+--targeted-out .gstack/tmp/targeted.json`, and write again with
+`--review-targeted @.gstack/tmp/targeted.json`.
+
+**`field=review_exclude`.** `gstack-ship-receipt write` and the queue's receipt check also
+use this code when the receipt's review_exclude digest (or the
+`--review-exclude <digest>` write was given) is not the digest HEAD has under the
+base policy's [`review_exclude_paths`](ship-policy.md#review-exclude-paths). The line
+names `expected=` (now), `recorded=` (the `--review-exclude` argument, or the digest
+the receipt recorded from it; `none` without one) and `source=` (the base commit).
+A mismatch proves only that this argument differs from the selection the head has
+now. Write compares the argument and does not read the review ledger, so the line
+says nothing about what the readers read, and a write that passes the `expected=` digest clears
+the field without a review. Do not do that. Rerun
+`/ship`'s review on the head (`gstack-review-dispatch pass --base <base>`),
+run `gstack-review-dispatch verify --ledger <ledger>`, which prints
+`REVIEW_EXCLUDE_RECORD: digest=<d>` from the briefs the readers got, then
+`gstack-ship-receipt write --pr <n> --review-exclude <d> --body <body>`.
+`recorded=none` with a `no --review-exclude was given` note means the write left the flag out: pass the digest
+`verify` printed. When the only change since the review is Step 14.5's docs audit editing, adding or
+removing files under a pattern, pass that run's `--docs-post <audit-id>-post.json` and its Prepare snapshot as
+`--docs-pre` as well instead of rerunning the review; the refusal's `the docs-audit exception does not apply:` clause says why when it cannot
+([ship-policy.md](ship-policy.md#review-exclude-paths), GST-1429). When the run audited twice (a re-audit after a base merge),
+pass the last audit's pair; its post snapshot must carry the earlier audit (`--carry <earlier -post.json>`, GST-1616), or the
+earlier audit's files stay in the selection and write refuses as before.
+
+Write, carry and the queue bind a digest that differs (`recorded=none`, written before the base
+gained `review_exclude_paths`, or a digest from an older policy) when the recorded selection and
+HEAD's give the PR's files the same applied patterns, excluded files and kept files (GST-1434,
+GST-1446). Write rebuilds the recorded selection from the policies the base held and prints
+`REVIEW_EXCLUDE_POLICY_MOVED:` when it binds. So this line means the two selections differ over the
+PR's files, or write could not rebuild the digest from any policy the base held (a shallow clone
+of the base can cause that: fetch its history and rerun write).
+
+<a id="review-diff-too-large"></a>
+### `REVIEW_DIFF_TOO_LARGE`
+
+**Meaning.** One reviewer's diff is over the 2,000,000-byte review ceiling
+(about 500K tokens). `gstack-review-dispatch pass`, `stage` and `render` read
+each reader's diff once before writing anything, and stop (exit 3, nothing
+written) rather than hand a reader more than it can read. The line names the
+reader, its bytes, the five largest top-level folders (`top=<dir>:<bytes>`) and
+the base policy commit.
+
+**Fix.** The line prints the fix for where the base policy stands:
+
+- **No key:** copy the printed JSON (`{"review_exclude_paths":[…],"min_gstack_version":"…"}`)
+  into `.gstack/ship-policy.json` on the base as its own PR. A lane cannot land on
+  the base itself: ask the repo owner or the coordinator. Once it merges, bring
+  the base into the branch and rerun once; if it is still over, split the PR.
+- **The branch declares the key but the base does not:** only the base copy
+  applies; land that hunk on the base first, as above.
+- **A pattern was not applied** (`skipped=` on the `REVIEW_EXCLUDE:` line): its kept
+  files need more than 24,000 argument bytes. Narrow the pattern, move the kept
+  files out of it, or split the PR.
+- **Still over after exclusion:** add the printed folders to the base policy, or
+  split the PR. Files kept only for a secret line already count as their
+  excerpts ([secret-line excerpts](ship-policy.md#secret-line-excerpts)); one in
+  `DIFF_KEEP:` that still counts whole is kept for another reason or could not
+  be excerpted.
+
+There is no override flag. See [the review ceiling](ship-policy.md#review-diff-ceiling).
+
+<a id="review-diff-unreadable"></a>
+### `REVIEW_DIFF_UNREADABLE`
+
+**Meaning.** git could not read a reviewer's diff, so the pass stopped (exit 1)
+before writing a manifest or a brief. `reason=timeout` means `git diff` ran past
+`timeout_ms` (120,000 ms; fixed, no flag); `reason=git-exit` gives git's exit code.
+The line carries the diff base, git's first stderr line with remote URLs
+replaced by `<url>`, and `log=`, a file under the run directory holding git's whole
+stderr, redacted the same way. It is also printed when git cannot list the
+files `review_exclude_paths` matches.
+
+**Fix.** By reason: a timeout, rerun once unchanged, then split the PR or
+exclude its largest data folders on the base; git exit 128 (a missing object or
+an unfetched base), `git fetch origin <base>` and rerun once; anything else, stop
+and ask a person with the log file.
+
+<a id="review-plan-stopped"></a>
+### `REVIEW_PLAN_STOPPED`
+
+**Meaning.** `gstack-review-plan` did not finish inside its limit, so it printed
+no plan, or `gstack-review-dispatch pass`, which runs it before it writes a
+manifest, stopped without dispatching a reader (exit 1 either way). The line
+names the step (the plan command), `reason=timeout` with `timeout_ms` (180,000
+ms; `GSTACK_REVIEW_PLAN_TIMEOUT_MS` sets it in milliseconds), `reason=signal` with the signal when something else
+killed it, or `reason=spawn` when it could not start. Before this line existed, a
+plan that ran past the limit was killed with no output (GST-1442).
+
+**Fix.** Rerun once unchanged. If it stops again, report the line and the
+repository's file count (`git ls-files | wc -l`) to your Captain. For
+`reason=signal`, check the machine's free memory first.
+
+<a id="review-exclude-reference"></a>
+### `REVIEW_EXCLUDE_REFERENCE`
+
+**Meaning.** Informational, never a stop. A kept code file names a folder that
+`review_exclude_paths` excludes (for example the harness that writes
+`receipts/`). A folder reference does not keep files; only a full file path
+does, so readers see that code without the files it reads.
+
+**Fix.** Nothing for the review itself. If the code's correctness depends on the
+excluded files, narrow the pattern on the base so they stay in the diff.
+
+<a id="fetch-violation"></a>
+### `FETCH_VIOLATION`
+
+**Meaning.** A reader broke [the fetch rule](review-policy.md#what-readers-may-fetch):
+between the start and the end of one review stage, a git repository with a
+network remote, or a file of 100 MB or more, appeared under the workspace, home
+or the temp dir. `gstack-review-dispatch sweep --phase end` prints one line per
+path (`kind=repo|download`, the remote, the size and the stage's readers). Capy
+exposes no reader id, so the stage is the unit: every reader of that stage is
+quarantined. Its reply moves to `<out>/quarantine/` (mode 0600), its findings
+leave `merged.jsonl`, and it never reaches the Red Team, the judge, the
+returned output or PR text. `verify` prints `FETCH_VIOLATION:` and refuses
+until the stage has rerun and swept clean. A test run's fixtures (a root
+carrying `.gstack-test-fixture`, or a repository whose remote resolves to a local
+path through `url.<base>.insteadOf`) print `FETCH_IGNORED:` and never count.
+
+**Fix.** Nothing to rerun by hand: the pass plans one fresh attempt per slot
+(`RERUN:`, readers named `<reader>#2`; not a review round) and the pass program
+dispatches them next. Each path gets a `KEEP:` line and never a delete command:
+the sweep goes by time alone, and no transcript can tie a path to a reader, so a
+clone another process on the machine made in the same window looks the same.
+Inspect each path and leave it alone, then write a decision-trail row and tell
+your Captain. A sweep that hit its bounds (depth 6, 200,000 entries or 20 seconds)
+prints `FETCH_SWEEP: partial`, a note that is never a refusal.
+
+<a id="fetch-rerun-blocked"></a>
+### `FETCH_RERUN_BLOCKED`
+
+**Meaning.** A path a stage's first attempt found (a `FETCH_VIOLATION:` line)
+still exists when that stage's rerun, or any other stage of the same pass
+(Step 11's voices included), starts. A reader could open that clone or
+download and still sweep clean, so no reader is dispatched, the pass stops
+(exit 3) and `verify` keeps refusing with the first attempt's
+`FETCH_VIOLATION`.
+
+**Fix.** Stop and report the printed path to your Captain. Leave it alone: no
+transcript ties it to a reader, so never move or delete it yourself. Once the
+path is gone, rerunning the same pass program resumes the rerun from its
+manifest.
+
+<a id="fetch-rerun-spent"></a>
+### `FETCH_RERUN_SPENT`
+
+**Meaning.** The stage's one rerun fetched too, so the pass stopped (exit 3).
+Its readers are quarantined like the first attempt's, nothing they wrote is
+merged, and `verify` refuses. Running the same pass program again stops at
+once: it starts no later stage (no Red Team beside the kept paths) and returns
+no reader output.
+
+**Fix.** Deal with the paths the `FETCH_VIOLATION:` lines name as above. Then
+find out why readers keep fetching (a brief or a checklist that sends them to
+another repository, or a sealed path the policy does not list yet) and start a
+fresh pass under a new `--pass` and `--out`. A third attempt is never automatic.
+
 <a id="execution-unknown"></a>
 ### `EXECUTION_UNKNOWN`
 
@@ -3276,6 +3904,55 @@ result.
 
 **Fix.** Run `gstack-autoplan status --out <dir>` and submit for the attempt
 the last `next` printed (`ATTEMPT: ... phase=<p> voice=<v>`).
+
+<a id="ceo-only-conflict"></a>
+### `CEO_ONLY_CONFLICT`
+
+**Meaning.** `gstack-autoplan next --ceo-only` was combined with `--ui`,
+`--developer-tool` or `--agent-primary` (on the command line or in the plan's
+`gstack-autoplan-scope` marker), each of which adds a phase a CEO-only run
+never opens; or the marker names `--ceo-only` (the mode is a command-line
+choice for one run, so a plan can't pin it); or the plan is `<out>/ceo-review.md`
+(directly, through a symlink or a hard link), the report the run would write
+over it. The finish checks that last case again before it writes the report.
+
+**Fix.** Drop the conflicting flag (or the marker token), move the plan out of
+the report path, or run the full review without `--ceo-only`.
+
+<a id="ceo-only-after-init"></a>
+### `CEO_ONLY_AFTER_INIT`
+
+**Meaning.** `next --ceo-only` named a run directory that already holds a full
+review run. A run keeps the mode it started with.
+
+**Fix.** Start the CEO-only run in a new `--out` directory, passing
+`--ceo-only` on its first `next`.
+
+<a id="ceo-only-no-gate"></a>
+### `CEO_ONLY_NO_GATE`
+
+**Meaning.** `answer`, `recommend` or `revise` was run on a CEO-only run, or
+`gstack-approvals import` was pointed at one. A CEO-only
+run writes no gate, ends `status=reviewed` and is never approved, so there is
+nothing to answer, change or import. (`budget` and `close --deferred` still
+work: they are how a budget-stopped CEO-only run recovers.)
+
+**Fix.** Read `<run dir>/ceo-review.md`. For a gate and an approval, start a
+full review in a new directory: `gstack-autoplan next --out <new dir> --plan
+<file>` without `--ceo-only`.
+
+<a id="shadow-before-answer"></a>
+### `SHADOW_BEFORE_ANSWER`
+
+**Meaning.** `gstack-autoplan shadow` skipped a gate revision whose plan
+approval (`p1`) is unanswered or was answered `c` (interrogate). The export
+pairs each hidden prediction with the owner's answer, so a revision he has not
+answered has nothing to pair it with. Answered revisions of the same run still
+export; the command exits 3 only when nothing was exported.
+
+**Fix.** Answer the gate (`gstack-autoplan answer --out <dir> --gate-rev <n>
+...`), then run `gstack-autoplan shadow` again. See
+[Shadow mode](unattended.md#shadow-mode).
 
 <a id="attempt-mismatch"></a>
 ### `ATTEMPT_MISMATCH`
@@ -3510,6 +4187,23 @@ the entry is reported as unverified, not `REGEN_STALE`.
 **Fix.** Run the printed install command (`bun install`, or the one matching the
 repository's lockfile), then rerun `gstack-regen check` or the pre-gate.
 
+<a id="pregate-gstack-too-old"></a>
+### `PREGATE_GSTACK_TOO_OLD`
+
+**Meaning.** `.gstack/pregate.json` uses a key this gstack does not know, and
+the same tree's `.gstack/ship-policy.json` sets `min_gstack_version` above this
+gstack. The key belongs to a newer gstack (one a later release adds), so the
+line reads `needs gstack >= <version>; upgrade`. The policy still refuses,
+exactly as `PREGATE_CONFIG_INVALID` would. Only a gstack that has this check
+prints it; one released before it (1.94.0.0 included) reports the same key as
+`PREGATE_CONFIG_INVALID`.
+
+**Fix.** Upgrade gstack on this machine to at least the version named
+(`bin/gstack-upgrade`, or the session install with `--for <skill>`), then
+rerun. A repo adopting a new key raises `min_gstack_version` first, so an older
+gstack that has this check prints this instead of a generic invalid-config
+error.
+
 <a id="pregate-config-invalid"></a>
 ### `PREGATE_CONFIG_INVALID`
 
@@ -3526,7 +4220,7 @@ base branch's copy or the user-owned file. For the user-owned file, edit it
 directly at the path the message names. A user file inside the repository, or
 reached through a symlink into it, is ignored rather than read (`--explain`
 names it). An unknown `sealed` key that a newer gstack defines (such as
-`allow_paths` or `case_insensitive`) means this machine's gstack is older than
+`allow_paths`, `case_insensitive`, `label_keys` or `identifier_keys`) means this machine's gstack is older than
 the policy: upgrade gstack here, and raise `min_gstack_version` in the
 repository's `.gstack/ship-policy.json` before landing such a key.
 
@@ -3547,7 +4241,11 @@ anchored pattern and a reason ([docs/pregate.md](pregate.md#allowlist));
 ### `PREGATE_STRAYS`
 
 **Meaning.** A file was added at the repository root, in a new top-level
-directory, or under a scratch name (`zz-*`, `tmp*`, `scratch*`).
+directory, or under a scratch name (`zz-*`, or `tmp` or `scratch` as the whole
+name stem, optionally numbered: `tmp.js`, `tmp2.js`, `tmp_1.txt`, `scratch.md`,
+but not `tmp-watch.js`, `tmpfs-mount.js`, `scratchpad.ts` or `tmp-repro.ts`) or an editor
+leftover name (`*.orig`, `*.rej`, `*.swp`, `*.swo`, `*.bak`, `*.tmp`, `*~`,
+`.DS_Store`, `Thumbs.db`).
 
 **Fix.** Delete or move it. An intentional root file goes in `strays.allow`.
 
@@ -3558,7 +4256,12 @@ directory, or under a scratch name (`zz-*`, `tmp*`, `scratch*`).
 appears with its old value in a test file the branch did not update — nightly-
 and Heavy-only files included.
 
-**Fix.** Update every listed `file:line`, or keep the old value.
+**Fix.** Update every listed `file:line`, or keep the old value. When a test
+keeps the old value on purpose (the refused input after a minimum version goes
+up), mark that line: `// pregate-literal: NAME=<old value> <reason>` on the line
+or on the comment line directly above it. The marker waives only that line, and
+the check lists it as `waived:`. Don't use `warn: ["literals"]` for this, since
+that turns the check off for every constant.
 
 <a id="pregate-no-lane"></a>
 ### `PREGATE_NO_LANE`
@@ -3648,6 +4351,14 @@ two routes:
 An allowlist entry or a `[]` declaration the branch adds to its own
 `pregate.json` counts only once it is on the base.
 
+/ship's own reruns on the final tree (`gstack-ship-release accept`, and
+`finish` when it reruns the whole pregate) pass `--policy-from head`
+themselves when the branch's copy differs from the one it forked from in
+nothing but added test lanes and `.gstack/generated.json` matches the base
+tip's, and print `POLICY: head (unreviewed) …`; any other difference keeps the
+base policy and prints `POLICY: base … (the branch's copy <what differs> …)`
+([accept's policy choice](pregate.md#accept-head-policy), GST-1595).
+
 <a id="pregate-head-policy-loosens"></a>
 ### `PREGATE_HEAD_POLICY_LOOSENS`
 
@@ -3694,14 +4405,14 @@ the lane log, then rerun or split the selection. A tool missing from PATH is
 <a id="pregate-stalled"></a>
 ### `PREGATE_STALLED`
 
-**Meaning.** A test command the lanes check (or a guard) launched wrote nothing to its log for the stall timeout (default 300 s,
+**Meaning.** A test command the lanes check (or a guard) launched wrote nothing to its log, and its process group used under a tenth of one CPU (Windows: log growth alone), for the stall timeout (default 300 s,
 `stall_timeout_s` in the base branch's `.gstack/pregate.json` or the user-owned file, or
 `--stall-timeout`). pregate killed its process group and names the last test
 file started. The check is incomplete, never pass.
 
 **Fix.** Open the printed log, find the hang in the named file (a blocked
 child, a server that never exits, a synchronous wait), fix it and rerun
-`gstack-pregate --stage tests`. A test that is legitimately quiet for longer
+`gstack-pregate --stage tests`. A test that legitimately waits quietly for longer
 needs a larger `--stall-timeout`; `0` disables the stall kill and leaves only
 `--timeout`. The `--remote` gate never stalls: it is bounded by `--timeout`
 (else `timeout_s`), so a gate that waits on CI needs a timeout long enough for
@@ -3722,6 +4433,18 @@ reads `gstack-pregate clear: receipt refused — REUSE: refused reason=<code> �
 …`, and the GitHub Actions runs offered did not verify against the base
 branch's `run_profiles`. Each reason code and
 what it checks is listed in [run evidence](pregate.md#run-evidence).
+
+`gstack-pregate clear --remote <workflow.yml/job> --run-url <url>` on a lane
+with no run profile refuses with this code too, reading `REUSE: refused
+reason=<code> — …`: `run_ref_invalid` (not an Actions run URL or id on this
+repository), `api_error` (gh could not read the run), `workflow_mismatch` (a
+run of another workflow), `run_in_progress` (still queued or running) or
+`run_not_success` (it failed, was cancelled or timed out). Each prints a fix
+line; after the last three, clear again with a finished green run of the
+lane's own workflow ([run evidence](pregate.md#run-evidence)). For a lane whose
+workflow runs only through `workflow_call`, a run of a workflow whose job says
+`uses: ./.github/workflows/<lane's>.yml` counts as a run of the lane (GST-971);
+it refuses `caller_job_skipped` when its `<calling job> / <lane job>` job did not succeed.
 
 Another tree is accepted in exactly one case: it differs from `pregate.json`'s
 tree only in the repo's stamp rule (`.gstack/ship-policy.json` on the base
@@ -3783,7 +4506,10 @@ and the table prints `environment: <kind> — <evidence>`. A test that failed an
 whose log also names a connection error is **not** this code: the runner's own
 summary counted a failure, so it is `PREGATE_LANE_FAILED` with `cause:
 "diff"`; nor is a runner, guard or gate script whose own binary is present but
-exits 127. `proof: "launch"` is certain (the command could not start, its
+exits 127. One exception: a Playwright lane where every test failed and
+Playwright says its browsers are not installed is `missing-binary` with
+`proof: "output"` (`npx playwright install`); a partial install stays the
+diff's failure. `proof: "launch"` is certain (the command could not start, its
 binary is off PATH, the runtime or a gstack tool refused); `proof: "output"`
 means a rule matched the command's text before any test was counted, which the
 diff's own output could have written, so the line says `(inferred from output)`
@@ -3824,7 +4550,7 @@ after `clear`), so it clears nothing here; or a `clear --run` receipt names
 another tree than `pregate.json`'s with no substitution recorded (`run
 receipt(s) verified for another tree`).
 
-**Fix.** Dispatch that job, then
+**Fix.** Dispatch that job, wait for it to finish green, then
 `gstack-pregate clear --remote <workflow.yml/job> --run-url <url>` (or
 `--bundle-lane <label>` from an evidence bundle). For `pregate.json/remote_gate`,
 `clear --remote pregate.json/remote_gate --receipt <gate output>`: the gate's
@@ -3901,15 +4627,17 @@ refuses to start without a passing check.
 
 **Meaning.** The preregistration says `stack: loaded` (some arm loads gstack or
 another skill stack) and its `## No-gstack arm` section is missing, lacks one
-of `arms:`, `inputs:`, `prompt:`, `panel:` or `report:`, lists an arm that
+of `arms:`, `inputs:`, `prompt:`, `panel:`, `report:`, `masking:`, `install:`
+or `audit:` (or says `none` for one of the last three), lists an arm that
 is not a `<model>#no-gstack` Arms line, or leaves a model in the comparison
 without its own no-gstack arm. Arms match on whole identities, so
 `claude-opus-5#no-gstack` does not cover `claude-opus-5-5`.
 
 **Fix.** Add one `<model>#no-gstack` line per model under `## Arms`, list them
-on the `arms:` line, and fill the other four keys: the same inputs, a plain
-prompt with no skill text, the same panel and judge, and where the result row
-goes beside the variants. When no arm loads a skill stack, write
+on the `arms:` line, and fill the other keys: the same inputs, a plain
+prompt with no skill text, the same panel and judge, where the result row
+goes beside the variants, how the run agent is masked from the Capy drives,
+the check that no gstack is installed, and the per-arm drive-read audit. When no arm loads a skill stack, write
 `stack: none` with a `why:` line instead. The rule is in
 [docs/TESTING_INTERNALS.md](TESTING_INTERNALS.md#no-gstack-arm).
 
@@ -4135,7 +4863,10 @@ migration is a code change, so the gate reruns.
 sealed path or transcript (binary, empty and later-deleted files included), or
 adds a line with a sealed-answer marker, a seed or a local home path, and the
 destination is public or its visibility is unknown (a new or unreadable
-repository counts as public). An unreadable or malformed sealed policy refuses
+repository counts as public). With `sealed.label_keys` set, a new record that
+puts a label field next to an identifier (`sealed.label_join`), or a supported
+file the guard could not read (`sealed.label_join_unchecked`), refuses the
+same way. An unreadable or malformed sealed policy refuses
 too. The managed pre-push hook and `gstack-pregate sealed` print one line per
 finding: rule, `file[:line]`, commit. They never print the matched text.
 
@@ -4144,7 +4875,9 @@ reaches the public repository (a later commit that deletes it still publishes
 it). A publishable file kept next to sealed data (a `MANIFEST.json` of hashes
 and counts) can be exempted from the path rules with a `sealed.allow_paths`
 glob in the base branch's `.gstack/pregate.json`; the text rules still read it
-([docs/pregate.md#sealed](pregate.md#sealed)). A reviewed false positive gets
+([docs/pregate.md#sealed](pregate.md#sealed)). For `sealed.label_join`, drop
+the identifier fields (or the labels) from the published file, or keep the file
+out of the public repository; `allow_paths` never exempt it. A reviewed false positive gets
 one line in the base branch's
 `.gstack/sealed-allow.tsv`: `rule<TAB>path<TAB>sha<TAB>reason`, where `sha` is
 the full commit sha (a shortened one is ignored and named on stderr). A private
@@ -4270,6 +5003,16 @@ recommended `b` pending, and `all` now takes them.
 **Fix.** Render again (`gstack-gate render <dir>/gate.json --all`), relay it,
 and answer with `--rec-hash <h>` from that render. Explicit `<id><option>`
 tokens are never refused.
+
+Since GST-1819 the hash also names the run, its reviewed plan's sha256 and each
+item's title and option keys, so a `--rec-hash` from another run's gate with
+the same decision shape is refused too: answer each run with the hash its own
+render printed. A gate written before that (its `gate.json` has no
+`rec_hash_v`) still accepts the hash it printed then, and the answer records
+that hash. That old hash is not bound to its run, so two such gates with the
+same decision shape still accept each other's: re-render a pending one and
+answer with the new hash its render prints. A `recommend` on it moves it to the
+new hash.
 
 <a id="checkpoint-invalid"></a>
 ### `CHECKPOINT_INVALID`
@@ -4421,6 +5164,30 @@ a hit there needs a plan edit: change the path, `revise`, and export again.
 Generic home-directory paths that are not recorded roots are WARN lines, not
 errors.
 
+<a id="artifact-owner-words"></a>
+### `ARTIFACT_OWNER_WORDS`
+
+**Meaning.** A public copy of an autoplan run still quotes the owner's own
+words: a gate reply the private run recorded (on a decision row, the gate or
+the journal), the words a carried gate reused, or a reason a human gave for
+deferring a phase, in prose or in one of gstack's renderings of that reason.
+Nothing a person wrote leaves without their click. A reply of 3 or more words
+is a quote wherever it appears whole, and from 8 words any 8 consecutive words
+are one, compared across punctuation, line breaks, JSON escapes, entities, HTML and
+Markdown markup, invisible format characters, contractions and case; replies
+of 1 or 2 words are not scanned for, and words the owner echoed from earlier
+text he didn't write are not his (the words a reply adds to an echo still are). See
+[the public copy](unattended.md#the-public-copy). `gstack-artifact validate --public <dir> --private
+<run>/run.json` reports each quote with file:line, and `gstack-autoplan export
+--public` runs that check on a staging copy and writes nothing when it fails.
+The error never prints the words themselves.
+
+**Fix.** Export with `gstack-autoplan export --out <run> --public <dir>`, which
+drops those fields and replaces each quote or rendering in prose and sealed
+reviewer files with `[owner words redacted]`. Export never rewrites inline code
+or fenced blocks in plan.md, so a quote there needs a plan edit: remove it,
+`revise`, and export again.
+
 <a id="artifact-public-target-exists"></a>
 ### `ARTIFACT_PUBLIC_TARGET_EXISTS`
 
@@ -4568,6 +5335,34 @@ gstack would read differently or not at all, so every ship-policy reader
 raising `min_gstack_version` raises the crew's install floor at the same
 time; `gstack-ship-policy validate` prints `MIN_READER:` for exactly that.
 
+<a id="policy-floor-above-stable"></a>
+### `POLICY_FLOOR_ABOVE_STABLE`
+
+**Meaning.** `.gstack/ship-policy.json` sets `min_gstack_version` above the
+newest stable gstack release (the highest `v<version>` release tag at
+origin's `stable` commit, or the VERSION at the stable ref). Every lane on the stable update channel runs that
+release, so each one refuses the policy (`POLICY_GSTACK_TOO_OLD`), and
+upgrading cannot help until a release at or above the floor is cut; the
+doctor's floor row says `no release meets this floor yet`.
+`gstack-ship-policy validate` and the pregate `policy-floor` check (on a
+branch that changes the policy) refuse it, naming the floor and the release.
+
+**Fix.** Set `min_gstack_version` to the stable release the message names, or
+lower, and leave out the keys that need a newer gstack until a stable release
+carries them. Then rerun `gstack-ship-policy validate`.
+
+<a id="stable-release-unknown"></a>
+### `STABLE_RELEASE_UNKNOWN`
+
+**Meaning.** A warning, never a refusal: `gstack-ship-policy validate` or the
+pregate `policy-floor` check could not resolve the newest stable gstack
+release, so the policy's `min_gstack_version` was not compared with it. The
+release comes from the gstack checkout's origin (its release tags), or, when
+origin cannot be reached, from its local stable ref and release tags.
+
+**Fix.** Run `git fetch origin --tags` in the gstack checkout, or point
+`GSTACK_STABLE_REPO` at a gstack checkout that has the tags, then rerun.
+
 <a id="queue-not-ready"></a>
 ### `QUEUE_NOT_READY`
 
@@ -4582,13 +5377,16 @@ uses it while a slot cannot merge yet: checks on the stamp commit are not
 green, a name in `changelog_fragments.required_checks` is missing or not green
 there, the PR's base is no longer the train's base, the stamp push failed while
 the branch still read the pin, `gh pr merge` refused, or the merge is not yet
-visible on main.
+visible on main. `land` also uses it when a land lock push to origin failed and
+origin's lock ref could not be read to tell whether the push landed.
 
 **Fix.** Commit and push, wait for CI on that head, rerun
 `gstack-pregate run --allow-repo-commands` when the tree changed, then rerun
 `gstack-ship-queue ready --pr <n>`. The block it prints before refusing shows
 which line is not yet true. For `train land`, do what `NEXT:` says, then rerun
-the same `train land` command; it adopts its own journaled stamp commit.
+the same `train land` command; it adopts its own journaled stamp commit. For an
+unreadable land lock, rerun the same `land` command once origin answers; it
+resumes its own lock.
 
 <a id="queue-proof-missing"></a>
 ### `QUEUE_PROOF_MISSING`
@@ -4604,7 +5402,10 @@ train still building, running or merging, `train watch` on an unknown record,
 unreadable run), `verify --pr <n> --train <nonce>` when main's tree mismatches
 and whether a slot merged on GitHub cannot be read (so whether the queue must
 freeze is unknown; it never answers "nothing merged" from an unreadable
-state), `train land` when the base or the train branch cannot be fetched or
+state), `verify --pr <n> --train <nonce>` when GitHub does not report the PR
+MERGED and it is not a release-only PR whose stamp-only diff already matches
+main, or when it could not read the PR's current head (`--no-fetch` or a failed
+fetch), without freezing the queue, `train land` when the base or the train branch cannot be fetched or
 the record's T0 and S_1..S_k are not the gated head's first-parent chain
 (each S_i's second parent slot i's pin), `train land` when main's tree is the
 slot's S_i but GitHub does not report the PR as MERGED (a record whose slot
@@ -4699,25 +5500,76 @@ stays on the trusted-branch path.
 
 **Meaning.** A CHANGELOG fragment under the policy's `changelog_fragments`
 directory is not one regular `.md` file directly in that directory with entry
-text, optional `bump:` front matter and no release heading, or it is over
+text, optional `bump:` and `important:` front matter and no release heading, or it is over
 64 KiB, or a fragment of that name already landed with other text. Nothing was
 allocated or written. See [changelog fragments](ship-policy.md#changelog-fragments).
 
 **Fix.** Rewrite the named fragment as a flat `<dir>/<slug>.md` holding only
-the entry text (and optional `bump: minor|major` front matter); rename it if
+the entry text (and optional `bump: minor|major` and
+`important: security|regression|data-loss|blocker` front matter); rename it if
 the name already landed. Then rerun.
 
 <a id="queue-land-locked"></a>
 ### `QUEUE_LAND_LOCKED`
 
-**Meaning.** Another `gstack-ship-queue land` holds the repository land lock
-(`refs/notes/gstack-land`), or took it from under this run, so this one would
-race it for the next version. The line names the holder, its PR and phase.
+**Meaning.** Another `gstack-ship-queue land`, or a `train land` slot, holds the
+repository land lock (`refs/notes/gstack-land`), or took it from under this run,
+so this one would race it onto main. The line names the holder: `#<pr>` for a
+land, `train <nonce> slot <i> (#<pr>)` for a train, with its holder and phase. A
+train keeps the lock in phase `between` from one merged slot to the next, so no
+standalone land slips in between slots.
 
 **Fix.** Wait for the holder to finish. If it crashed, rerun with
-`--break-lock`; that is refused while the holder entered a push or a merge
-less than 10 minutes ago. A lock in phase `drift` is released by landing its
-repair PR ([QUEUE_LAND_DRIFT](#queue-land-drift)).
+`--break-lock`, which prints the holder (`LOCK_HOLDER:`). That is refused while
+the holder entered a push or a merge less than 10 minutes ago, while a train is
+between slots for less than 10 minutes, and for a live train run unless you also
+pass `--break-train-lock`. A lock in phase `drift` is released by landing its
+repair PR ([QUEUE_LAND_DRIFT](#queue-land-drift)); a lock in phase `freeze` is
+released by the verify that clears the freeze
+([QUEUE_TRAIN_FROZEN](#queue-train-frozen)). If that release push failed, the
+next `land` or `train land` takes the lock over once the freeze record it fetches
+shows the freeze cleared after the lock was written; `--break-lock` never does.
+
+A lock push that GitHub applied but answered with an error (an HTTP 502) is
+checked against origin's ref and counts as written, so a rerun resumes this
+run's own lock without `--break-lock`.
+
+<a id="queue-train-unstamped"></a>
+### `QUEUE_TRAIN_UNSTAMPED`
+
+**Meaning.** `verify --pr <n> --train <nonce>` found the slot head it would let
+merge without its own stamp: the head's `VERSION` is not above main's, or its
+CHANGELOG's top section is not headed with that version directly above main's
+top release (or keeps an `[Unreleased]` section main does not have). The line
+names the rule, the head's version and main's. Train 33 merged #3527 this way
+(a no-commit base merge, a restamp whose files were never staged, a bare
+commit) and shipped it under #3526's version. Nothing was merged.
+
+**Fix.** On the lane, run `gstack-restamp --next` on the head, commit what
+restamp staged, push, and rerun the verify.
+
+<a id="restamp-not-staged"></a>
+### `RESTAMP_NOT_STAGED`
+
+**Meaning.** `gstack-restamp` wrote the stamp but `git add` failed, so a bare
+`git commit` would leave the stamp out. The files stay written, and
+`.gstack/tmp/restamp-staging.json` records what is still to stage.
+
+**Fix.** Clear what blocked `git add` (a stale `.git/index.lock`, for
+example) and rerun `gstack-restamp`; the rerun is a noop that stages the files
+it wrote. When any of them changed since restamp wrote it (you committed by
+hand, switched branches or merged the base), the marker is stale: the noop
+rerun drops it and stages nothing, and a stamp still owed is restamped as usual.
+
+<a id="restamp-unstaged-edits"></a>
+### `RESTAMP_UNSTAGED_EDITS`
+
+**Meaning.** A file `gstack-restamp` would stamp holds unstaged edits of yours.
+Restamp stages what it writes, so those edits would ride along in the stamp
+commit. Nothing was written.
+
+**Fix.** Stage (`git add`) or stash your own edits to the named files, then
+rerun `gstack-restamp`.
 
 <a id="queue-land-conflict"></a>
 ### `QUEUE_LAND_CONFLICT`
@@ -4752,6 +5604,104 @@ the two allowed restamps, so `land` stopped instead of restamping again.
 **Fix.** Find what is merging outside `land` (every merge should go through
 it), then rerun `gstack-ship-queue land --pr <n>`; the lock was released and
 the rerun restamps from the pin.
+
+<a id="queue-land-stamped"></a>
+### `QUEUE_LAND_STAMPED`
+
+**Meaning.** Under `merge: direct`, the PR changes VERSION, the
+`package.json` version or the CHANGELOG. Versions and the CHANGELOG are set at
+release, so a PR carries only its `changelog.d` fragment. Nothing was merged.
+
+**Fix.** The lane runs the command the refusal prints, for example
+`git checkout $(git merge-base origin/main HEAD) -- VERSION CHANGELOG.md`
+(and sets the `package.json` version back by hand when it's named), keeps or
+adds the fragment with the entry text, commits, then runs /ship and
+`gstack-ship-queue ready --pr <n> --no-screen` at the new head.
+
+<a id="queue-land-pin-moved"></a>
+### `QUEUE_LAND_PIN_MOVED`
+
+**Meaning.** The PR head isn't the pin `land --pin` was given, so the READY
+doesn't describe what would merge. Nothing was merged.
+
+**Fix.** The lane runs /ship and `ready --pr <n> --no-screen` at the new head
+and sends a new READY; land that pin.
+
+<a id="queue-land-checks"></a>
+### `QUEUE_LAND_CHECKS`
+
+**Meaning.** A check at the pin is red or pending, or a required check never
+ran there. Nothing was merged.
+
+**Fix.** Pending: `gstack-pr-wait <n> --until green`, then rerun land. Red:
+the lane fixes it at a new head (a flaky case gets its one rerun under rule
+16). Missing: dispatch that workflow on the branch, then rerun land.
+
+<a id="queue-land-merged-checks"></a>
+### `QUEUE_LAND_MERGED_CHECKS`
+
+**Meaning.** `origin/main` moved since the pin's merge base, and a
+`land.merged_checks` command failed on the pin merged onto main's tip. The
+message names the command, its exit and its last output lines. Nothing was
+merged.
+
+**Fix.** The lane merges `origin/main` into the branch, fixes what the
+command names, pushes, waits for the required checks, runs /ship and `ready`
+at the new head, and sends a new READY.
+
+<a id="queue-land-not-clean"></a>
+### `QUEUE_LAND_NOT_CLEAN`
+
+**Meaning.** GitHub doesn't report the PR `MERGEABLE` and `CLEAN`, or, on a
+stale base, the pin conflicts with main's tip (the message names the files).
+Nothing was merged.
+
+**Fix.** `CONFLICTING`: the lane merges the base into its branch, resolves,
+runs /ship and `ready` at the new head. `UNKNOWN`: GitHub is still
+computing, so rerun land in a minute. `BLOCKED` or `BEHIND`: meet the branch
+rule it names.
+
+<a id="queue-land-unverified"></a>
+### `QUEUE_LAND_UNVERIFIED`
+
+**Meaning.** GitHub merged the PR, but the base branch's merge commit tree
+isn't the pin merged onto that commit's parent, so something besides the
+reviewed pin reached main, or the merge commit's parent is neither in the pin
+nor the base land checked, so main moved between land's check and the merge,
+and `land.merged_checks` then failed on the landed tree or the base policy
+lists none. No land note was written.
+
+**Fix.** For a tree mismatch, compare the merge commit with `git merge-tree
+--write-tree <parent> <pin>`, revert what doesn't belong to the PR, and report
+it to the Captain. For a parent the pin doesn't contain, run the free checks on
+main at the merge commit; if one is red, fix forward or revert the PR, and
+report it to the Captain.
+
+<a id="release-stamp-empty"></a>
+### `RELEASE_STAMP_EMPTY`
+
+**Meaning.** `gstack-release-stamp open` (or `gstack-restamp --release`) found
+no changelog fragment on the base, so there's nothing to release. No branch or
+PR was created.
+
+**Fix.** Nothing to do. The next release stamp folds whatever fragments PRs
+land in the meantime. The stable cut still tags the current VERSION if that
+version has no tag yet.
+
+<a id="release-stamp-invalid"></a>
+### `RELEASE_STAMP_INVALID`
+
+**Meaning.** One of two things. A release stamp was asked to run somewhere other
+than a clean checkout of `origin/<base>`, or the base policy has no
+`changelog_fragments`. Or `land --pin` (or the Version Gate) was given a
+`release/<version>` head that is more than the release stamp of its merge base:
+it changes a file outside the stamp, deletes a release output, skips or adds a
+fragment, or carries a version other than the base's plus the fragments' bump. Nothing was written or
+merged.
+
+**Fix.** Close the bad release PR and run `gstack-release-stamp open` again.
+It stamps a fresh checkout of `origin/main`. Never edit a `release/<version>`
+branch by hand.
 
 <a id="queue-train-stamp-mismatch"></a>
 ### `QUEUE_TRAIN_STAMP_MISMATCH`
@@ -5082,6 +6032,52 @@ trains and other trains' merges are refused until a repair lands.
 <n>@<sha>`). The freeze clears when verify finds main's tree after that merge
 in a green record; `NEXT:` then builds a train of the PRs still unmerged.
 
+Under `merge: direct` trains are off, and a red main backstop (`train
+backstop` in the line) freezes `land --pin` the same way. Land the one repair
+with `gstack-ship-queue land --pr <n> --pin <sha> --repair`. It runs every
+normal pin check, then records the repair on the freeze under the land lock
+(`REPAIR: #<n>@<sha> admitted under the land lock`) and lands it; the freeze
+stays active. The next main backstop clears it when its gate is green on that
+main (`BACKSTOP: freeze cleared (repair #<n>; backstop <run> green on <sha>)`).
+Once main's policy declares `release_gate`, the backstop stands down: `land --pin` only warns (`FREEZE: warn only:`) about a backstop freeze left from before and lands, and `release-cut` lets that freeze go once a green release gate sits on a commit that contains the freeze's main ([release_gate](ship-policy.md#direct-freeze)).
+A second `--repair` is refused while the admitted one has merged at its
+recorded pin and no backstop has judged it; one that never merged there gives
+way. See
+[direct freeze](ship-policy.md#direct-freeze).
+
+<a id="backstop-freeze-stands"></a>
+### `BACKSTOP: green, but the freeze stands`
+
+**Meaning.** The main backstop gated main green, but the active freeze
+lacks the evidence to clear: no repair was admitted, the admitted repair has no
+`land` note (it was merged outside `land --pin --repair`), main doesn't contain
+that merge, main isn't at or after the freeze's main, or main moved past the
+gated commit (that push's backstop judges it). A train's freeze clears through
+its repair train's verify instead.
+
+**Fix.** Land the repair with `gstack-ship-queue land --pr <n> --pin <sha>
+--repair`. A repair that merged at its recorded pin but has no `land` note (the
+post-merge tree check could not finish) gets the note when you rerun that
+command, which goes straight to the tree check. Main doesn't move while
+frozen, and the backstop runs only on a push, so then gate the same commit
+again with the command the line names: `gh run rerun <backstop run id> -R
+<owner/repo>`. Nothing else clears the freeze.
+
+<a id="backstop-red-frozen"></a>
+### `BACKSTOP: red, and the queue is already frozen`
+
+**Meaning.** A red gate on main never writes a second freeze. On a backstop
+freeze it rewrites the reason with this red run and keeps `frozen since main
+<sha>`. When main contains the admitted repair's merge and the gate concluded
+`failure`, the reason adds `repair #<n> did not turn main green` and the repair
+slot is freed. A gate that never judged it (no run, cancelled, past the
+deadline) adds `repair #<n> was not judged` and keeps the slot: gate that main
+again with `gh run rerun <backstop run id> -R <owner/repo>`, as the reason
+says.
+
+**Fix.** Land the next repair (revert or fix-forward) with `land --pin
+--repair`.
+
 <a id="queue-wave-conflict"></a>
 ### `QUEUE_WAVE_CONFLICT`
 
@@ -5265,6 +6261,29 @@ wait`'s `--timeout`.
 **Fix.** Run `wait` again (the pause stays valid until it expires), or find who
 owns the base's red.
 
+<a id="base-contains-head"></a>
+### `BASE_CONTAINS_HEAD`
+
+**Meaning.** A base-relative step (`gstack-ship-queue ready`, `land` and
+`train` receipt binding, `gstack-review-plan`, `gstack-pregate`,
+`gstack-gate-diff`, `gstack-diff-scope`, `gstack-docs-candidate snapshot`)
+was given a base that is the head or already contains it, while the branch
+has commits its real base lacks. The comparison would read the branch against
+itself and report no changes, a false green. The usual cause is a checkout
+made by a PR flow: `refs/remotes/origin/HEAD` names the PR branch and there is
+no local `main` (GST-774). The detail names the base, the head, and the real
+base (the PR's base from `gh`, else the remote's live HEAD from
+`git ls-remote --symref`, else `origin/main`, else `origin/master`). For
+a pull request's head the queue refuses whenever the base contains it. On the
+base branch itself, on a detached HEAD, and on a fresh branch with no commits
+past its base, the step runs as before. `gstack-diff-scope` reports it as
+`SCOPE_ERROR=base_contains_head` (all flags false, exit 2) with the reason on a
+comment line.
+
+**Fix.** Pass the real base (`--base main`, or the PR's base branch). When
+`origin/HEAD` names the checked-out branch, `git remote set-head origin main`
+repairs every default at once.
+
 <a id="queue-receipt-depth-raised"></a>
 ### `QUEUE_RECEIPT_DEPTH_RAISED`
 
@@ -5288,8 +6307,10 @@ Never edit `review_depth` by hand ([review-policy.md](review-policy.md#review-de
 
 **Meaning.** The receipt records an owner exception (`docs.exception` or
 `review_loop_exception`) that the queue cannot accept: the record does not
-parse, a review-loop exception names no fix-check (`review_loop.fix_checks`
-is 0 or missing), its `fix_check.head` is neither the bound head nor an
+parse, a review-loop exception accepts a stop the review loop does not show (a
+`fix_check` with `review_loop.fix_checks` 0 or missing, or a `second_pass`
+with fewer than two passes or no deferred finding), its head (`fix_check.head`
+or `second_pass.head`) is neither the bound head nor an
 ancestor of it (not checked after a carry across rewritten history), or the PR
 body no longer carries the exception's line word for word
 (`Documentation exception: …` or `Review-loop exception: …`).
@@ -5297,6 +6318,23 @@ body no longer carries the exception's line word for word
 **Fix.** Restore the line in the PR body exactly as `write` printed it, or run
 /ship again and record the owner's acceptance with `--docs` or
 `--review-loop-exception` ([ship-policy.md](ship-policy.md#ship-receipt)).
+
+<a id="queue-receipt-targeted-missing"></a>
+### `QUEUE_RECEIPT_TARGETED_MISSING`
+
+**Meaning.** `ready`, `train build` or `land` recomputed the targeted
+classes the head needs (money, gate, auth, secret) from git, and the receipt's
+`review_targeted` does not cover every one of them with a `done` pass. The
+`REVIEW_TARGETED:` line prints the required classes, the classes a done pass
+covered (`legacy` when the receipt records no targeted pass) and
+`verdict=missing`, or `verdict=failed` when the recorded pass failed. A
+head that needs no class passes whatever the receipt records. The receipt is
+unchanged.
+
+**Fix.** Run /ship on the head the READY names so the targeted reader runs on
+every required class and `gstack-ship-receipt write --review-targeted` records
+a done pass ([review-policy.md](review-policy.md#targeted-pass-on-money-gate-auth-and-secret-code)).
+Never edit `review_targeted` by hand.
 
 <a id="queue-screen-stale-ref"></a>
 ### `QUEUE_SCREEN_STALE_REF`
@@ -5349,7 +6387,8 @@ closed PRs.
 verdict is read from the run itself, never from a lane's report: the
 `gate-binding-a<attempt>` artifact evals.yml's report job uploads (verdict,
 reconcile exit, flaky cases) and the `report-verdict-a<attempt>` artifact's
-`collector-outcomes.json` (the panels that failed the lane and the rule-16
+`collector-outcomes.json` (the panels that failed the lane, the report's `✗`
+failure lines, which name rule cases that have no panel, and the rule-16
 flaky lines). A case the binding calls red already failed twice inside the
 run (rule 16 reruns a first failure once), so the red is real. `ready`
 refuses with this code when the head's recorded screen run is red, whichever
@@ -5420,7 +6459,7 @@ ran no slice. evals.yml's `route` job plans nothing when
 between `ready --screen` and the plan) or when the plan selects no case; the
 run then uploads no `paid-plan` artifact (or an empty manifest), every slice
 job is skipped and GitHub shows a green check. On 2026-10-26, 18 of 41 PR
-screens ended this way. The verdict is read from the run (`lib/ship-queue-screen.ts`),
+screens ended this way. The verdict is read from the run (`crew/lib/ship-queue-screen.ts`),
 so such a run is `NOT-RUN`: `verify --pr <n> --screen` prints
 `SCREEN_VERDICT: #<n> run <id> NOT-RUN (<why>)` and refuses with this code, the
 READY receipt records `screen.verdict.outcome: NOT_RUN`, `ready --screen` never
@@ -5458,8 +6497,8 @@ asserts. Under machine load such a test fails without a code change. The
 **Fix.** Assert on the outcome instead: an injected clock, a forced deadline,
 an event or a poll with a deadline. When the bound is the contract, add
 `gstack-timing-ok: <reason>` in a comment on the line or the line above. Never
-raise a bound to make a flake pass; /investigate's flake playbook covers the
-diagnosis.
+raise a bound to make a flake pass; find the timing cause, pin it with a test
+that fails on it, and fix that.
 
 <a id="approval-classes-invalid"></a>
 ### `APPROVAL_CLASSES_INVALID`
@@ -5551,11 +6590,30 @@ record's start time and that each pass was finished with `via:"ship"`.
 **Meaning.** `gstack-review-scope classify` could not read the diff it scopes
 findings against: `origin/<base>` or `--range-base` does not resolve, or the
 range base is not an ancestor of HEAD (history was rewritten since the previous
-pass).
+pass), or `git diff` over that range failed, and the line names git's error or
+the 120-second timeout.
 
 **Fix.** Fetch `origin/<base>`, check `--range-base` against the pass heads in
 the invocation record, and start a full pass (`--pass 1`) when the branch was
 rebased; /ship's own rule is to merge the base in, never rebase a reviewed head.
+
+<a id="review-scope-ledger"></a>
+### `REVIEW_SCOPE_LEDGER`
+
+**Meaning.** `gstack-review-scope summary` could not count the review's
+dispatch ledgers, so it wrote no `REVIEW_LOOP:` line rather than a count that
+might be low (GST-951). Either no ledger was named (`--run`, `--ledger` or
+`--no-ledger`), `--run` holds no `review-ledger.jsonl`, or a ledger, the
+`merged.jsonl` it names or its judged set is unreadable, or the judged set
+changed after `judge` checked it. The ledgers hold every reader's findings
+(specialists, Red Team, both adversarial voices, targeted, fix-check) before any
+review-log row classifies them, which is why the count reads them.
+
+**Fix.** Pass `--run <run dir>`, the directory the review passes wrote (on
+Capy, `ship/DRIVER.md`'s run directory), or each `--ledger <f>`. Pass
+`--no-ledger` only when no reader ran through `gstack-review-dispatch`. When a
+file moved, restore it; when a judged set changed, rerun `gstack-review-dispatch
+judge` on it.
 
 <a id="receipt-carry-refused"></a>
 ### `RECEIPT_CARRY_REFUSED`
@@ -5574,7 +6632,10 @@ working tree's status. It also refuses when an owner exception the receipt recor
 no longer stands, and, for a receipt from a gstack that records review
 depth, when HEAD needs a deeper review than the receipt records, `--head` is
 not the checked-out HEAD, or the receipt records `gstack_version` without
-`review_depth` ([ship-policy.md](ship-policy.md#ship-receipt)). The receipt in
+`review_depth` ([ship-policy.md](ship-policy.md#ship-receipt)). It refuses, too, when
+HEAD needs a targeted class (money, gate, auth, secret) that the receipt's
+`review_targeted` does not cover with a done pass, since the queue would refuse
+that receipt. The receipt in
 the body is unchanged and still names the old head, so `gstack-ship-queue
 ready` refuses `QUEUE_RECEIPT_STALE`.
 
@@ -5582,7 +6643,7 @@ ready` refuses `QUEUE_RECEIPT_STALE`.
 `gstack-ship-receipt carry --pr <n>` at the new head. When the history is
 already rewritten and the receipt predates `head_tree`, run /ship on the new
 head; next time merge the base in instead of rebasing. For a retargeted stacked
-PR whose older receipt lost its parent branch, or a depth or exception
+PR whose older receipt lost its parent branch, or a depth, targeted or exception
 refusal, run /ship on the new head. When `--head` is not the checked-out HEAD,
 check it out and carry there.
 
@@ -5590,12 +6651,16 @@ check it out and carry there.
 ### `REVIEW_LOOP_EXCEPTION_INVALID`
 
 **Meaning.** `gstack-ship-receipt write --review-loop-exception` refused the
-record and wrote nothing: it is not `{ accepted_by, date, via, reason,
-fix_check: { head, findings[, files] } }`, `--review-loop` is missing or counts
-no fix-check, `fix_check.head` is neither the receipt head nor its ancestor,
-or the `--body` file lacks the `Review-loop exception: …` line.
+record and wrote nothing: it is not `{ accepted_by, date, via, reason }` with
+exactly one of `fix_check: { head, findings[, files] }` (a stop after a
+fix-check) or `second_pass: { head, deferred: [<finding id>] }` (a stop after
+the second full pass left a finding open, TRUT-7), `--review-loop` is missing
+or does not show that stop (no fix-check counted, or fewer than two passes or
+no deferred finding), the head is neither the receipt head nor its ancestor, or
+the `--body` file lacks the `Review-loop exception: …` line.
 
-**Fix.** Record the owner's exact words and the fix-check the stop followed,
+**Fix.** Record the owner's exact words and the stop they accepted (the
+fix-check, or the second full pass with the deferred finding's id),
 pass the `gstack-review-scope summary` file as `--review-loop`, put the printed
 line in the PR body, and write again
 ([ship-policy.md](ship-policy.md#ship-receipt)).
@@ -5626,7 +6691,10 @@ the reviewed tree but the base moved under it, so the diff a reviewer would see
 is not the reviewed one. For a stacked PR retargeted to the base after its
 parent landed, it means HEAD's product diff against the base is not the range
 reviewed against the parent branch: the parent has not fully landed, or the
-branch changed since. The reviewed verdict does not cover HEAD, so the
+branch changed since. A stacked PR whose receipt was written against the base
+carries from the newest reviewed commit the base already holds
+([ship-policy.md](ship-policy.md#receipt-carry)); it refuses here only when no
+such commit exists or the branch changed since. The reviewed verdict does not cover HEAD, so the
 receipt is not carried. The refusal names the changed product paths, or for a
 retargeted stacked PR the parent branch and the base.
 
@@ -5634,8 +6702,12 @@ retargeted stacked PR the parent branch and the base.
 conflict-only base merge, a test-only change, release metadata, a registered
 output the pregate's regen check proved, a rebase onto a covered tree with
 the recorded product diff, a stacked PR's retarget once its parent fully
-landed on the base, or base context next to unchanged hunks after a clean
-scoped review ([`RECEIPT_CARRY_SCOPED_REVIEW`](#receipt-carry-scoped-review)), which the
+landed on the base, a stamp on the branch's own rows in a stamp file it also
+changed as product (every changed line at a branch-added position, the mode
+unchanged, the base not touching the file), a stamp file the branch changes by
+no more than a stamp against each head's base (a changelog-fragment conversion
+that puts `package.json` back at the base's content), or base context next to unchanged
+hunks after a clean scoped review ([`RECEIPT_CARRY_SCOPED_REVIEW`](#receipt-carry-scoped-review)), which the
 `carry` object in the carried receipt records with the product patch-id and
 the range-diff evidence ([unattended.md](unattended.md#the-terminal-line)).
 
@@ -5645,11 +6717,18 @@ the range-diff evidence ([unattended.md](unattended.md#the-terminal-line)).
 **Meaning.** Every product path the branch touches has the reviewed +/- lines
 in the same places, but the base edited context lines next to some of them, so
 the 3-line patches differ (GST-384: main reworded the line above the PR's
-hunk). The merge may have spliced the two, as in a JSON entry where the branch
+hunk). A hunk whose added lines are unchanged and whose removed lines differ only
+by the base's edit of the lines the branch replaces counts too (GST-1561: the base
+took `SAVE_VERSION := 83` under the branch's `:= 84`). The merge may have spliced the two, as in a JSON entry where the branch
 changed one key and the base the next, so the receipt does not carry silently.
 The refusal names the paths and a packet file with the hunks that differ and
 the base's own change. The same lines moved somewhere else are
-`RECEIPT_CARRY_PRODUCT_CHANGED`, not this code.
+`RECEIPT_CARRY_PRODUCT_CHANGED`, not this code. A packet section over 200
+lines takes the full loop instead, but only the branch's own lines count toward
+that limit: the base's +/- lines, already merged at base, are shown and not
+counted (GST-1226), so a large base edit next to the branch's hunk still gets
+the scoped read. A base change over 2,000 lines in one file counts in full
+again and takes the full loop.
 
 **Fix.** Dispatch one fix-check reviewer
 ([review-policy.md](review-policy.md)) on the packet. When it comes back clean,
@@ -5661,12 +6740,45 @@ on the new head. `gstack-ship-release finish` stops the same way with
 write that record beside the packet, outside the worktree, so it does not change
 the tree it is bound to. Finish also stops this way for test code changed since
 review with no gate edit (`tests=N`): the packet holds those test hunks, and the
-reviewer checks that each test still tests what it did. A packet that cannot be
+reviewer checks that each test still tests what it did. It stops this way for
+[bounded post-review edits](review-policy.md#bounded-post-review-edits) too
+(`bounded=N`): one scoped reader, not a review round, reads the packet, and
+its clean record must also carry the `packet_sha256` the STOP line prints. A packet that cannot be
 written (an unwritable `.git`) is a STOP or `RECEIPT_CARRY_REFUSED` naming the path.
 `carry --dry-run` reports this code without writing the packet, and only when
 none of carry's other checks would refuse; carry without `--dry-run` writes it.
 In /ship Step 1, `gstack-ship-preflight` prints the route as `NEXT: carry
 route (Step 1.4)`.
+
+<a id="receipt-carry-recheck"></a>
+### Scoped re-check after `RECEIPT_CARRY_PRODUCT_CHANGED` (J1)
+
+**Meaning.** The product diff changed since the receipt's head, so the receipt
+can't carry as it is. When the history is linear, the base is the one the
+receipt was reviewed against, and `git range-diff` of the reviewed range
+against the current one is at most 400 lines (`RECHECK_RANGE_DIFF_CAP` in
+`crew/lib/ship-recheck.ts`), carry also prints `RECHECK: eligible
+range_diff_lines=N range_diff_sha256=<sha> packet=<file>`: one reader on that
+range-diff can clear it instead of a full second /ship. A rebased branch
+(`RECEIPT_CARRY_TREE_MISMATCH`), a retargeted stack, a receipt with no
+`review_depth`, more than 20 changed product paths, a binary path, a moved
+base context section over 200 lines, an empty or unreadable range-diff and a
+packet over 400 lines or 64 KB print `RECHECK: not eligible (<why>)` instead.
+When base context also moved next to reviewed hunks in other paths, their
+scoped-review sections join the same packet (GST-1561): the caps count the
+whole packet, `range_diff_sha256` binds all of it, and the RECHECK line's record
+adds `"range_base"`.
+
+**Fix.** Dispatch one reader on the packet (`.git/gstack/recheck-<head12>.md`;
+`--dry-run` writes none). When it comes back clean, write
+`{"from":"<reviewed head>","head":"<HEAD>","range_diff_sha256":"<from the RECHECK line>","reader":"<model>","verdict":"clean"}`
+(plus `"range_base"` when the line's record names one; a record without it then
+refuses) and rerun `gstack-ship-receipt carry ... --recheck <record.json>`. The carry
+reason records the reader and the range-diff size, and with moved context the
+context paths and `range_base`. Carry still refuses when
+HEAD needs a deeper review depth or a different risk class than the receipt
+recorded; that, or a blocking finding, means /ship on the new head. In /ship
+Step 1, `gstack-ship-preflight` prints this as `NEXT: carry route (Step 1.4, J1)`.
 
 <a id="receipt-prose-mismatch"></a>
 ### `RECEIPT_PROSE_MISMATCH`
@@ -5677,7 +6789,10 @@ body that names a counter the receipt records (`passes=3` against
 against `gate.passed: 41`) with a different value. The receipt is written from
 the run; the prose was typed, so a reader of the body would learn a number the
 run did not produce. The `PROSE:` line names each field with both values. The
-`## Approvals` table `gstack-approvals` renders is never read as a claim.
+`## Approvals` table `gstack-approvals` renders, the `Review-loop exception: …`,
+`Documentation exception: …`, `Ruled note: …`, `Mechanical retake: …` and
+`Test-lane exception: …` lines the receipt requires, and the inside of a
+closed code fence are never read as claims.
 
 **Fix.** Correct the body to the receipt's number. When the receipt is the
 stale one (the run was repeated), rerun `/ship` so the receipt is rewritten
@@ -5726,6 +6841,24 @@ reason }` and carry the `Documentation exception: accepted by <owner> <date> via
 `gstack-docs-candidate snapshot --exception .gstack/tmp/docs-audit.json`;
 `gstack-ship-release finish` stops on a blocked audit whose snapshot lacks the
 exception.
+
+<a id="docs-result-invalid"></a>
+### `DOCS_RESULT_INVALID`
+
+**Meaning.** `gstack-docs-candidate result` read the /document-release child's
+last nonempty line and it does not meet /ship Step 14.5's result contract: a key
+is missing, unknown or appears twice once whitespace around keys is trimmed, a
+field has the wrong type, the audit id, schema version or status invariant is
+wrong, or `documentation_section` is empty, a placeholder (such as `"x"`) or
+carries a `## Documentation` heading. Whitespace around a key is trimmed first and reported as
+`KEYS_TRIMMED:`, so `" documentation_section"` counts as `documentation_section`.
+The line names each problem. Nothing was saved: the audit's result cannot be
+used, but this is a malformed reply, not a blocked audit.
+
+**Fix.** Run Step 14.5's one remaining re-audit with the printed `RETRY_NOTE:`
+text appended to its prompt, word for word; it quotes the exact keys. With no
+attempt left, Step 14.5 stops and reports this code and the keys it names
+([ship/sections/documentation.md](../ship/sections/documentation.md)).
 <a id="gstack-pr-wait"></a>
 ## gstack-pr-wait
 
@@ -6086,7 +7219,7 @@ There is no ledger for that harness or id under `$GSTACK_STATE_ROOT/harness`. `g
 <a id="harness-hook-unsupported"></a>
 ### `gstack-harness: <harness> has no start hook` / `the start hook goes into the <harness> profile <dir>, and this registration uses another skills folder` (HARNESS_HOOK_UNSUPPORTED)
 
-The [start hook](hosts.md#start-hook) exists for OpenClaw and Hermes only, and it goes into the harness profile's own plugin folder, the one the harness scans. A registration with `--skills-dir` somewhere else has no profile gstack can trust, and with `OPENCLAW_CONFIG_PATH` set OpenClaw reads a config outside the profile, where gstack's settings change would not land, so `--start-hook` is refused and nothing is written. Register without `--skills-dir` (set `OPENCLAW_STATE_DIR` or `HERMES_HOME` to pick the profile), or drop `--start-hook`. When the choice comes from `GSTACK_HARNESS_START_HOOK` or `harness_start_hook` instead of the flag, such a registration just gets no hook, and its receipt says so.
+The [start hook](hosts.md#start-hook) exists for OpenClaw and Hermes only, and it goes into the harness profile's own plugin folder, the one the harness scans. A registration with `--skills-dir` somewhere else has no profile gstack can trust, and with `OPENCLAW_CONFIG_PATH` naming another config OpenClaw reads settings outside the profile, where gstack's settings change would not land, so `--start-hook` is refused and nothing is written. `OPENCLAW_CONFIG_PATH` naming the profile's own `openclaw.json` (compared after resolving symlinks) is not refused. Register without `--skills-dir` (set `OPENCLAW_STATE_DIR` or `HERMES_HOME` to pick the profile), unset `OPENCLAW_CONFIG_PATH` or point it at the profile's own `openclaw.json`, or drop `--start-hook`. When the choice comes from `GSTACK_HARNESS_START_HOOK` or `harness_start_hook` instead of the flag, the registration gets no hook, and `gstack-harness register` and `./setup --host` exit 4 with the reason (`HARNESS_HOOK_INACTIVE`, `start hook is off`); refreshes only print it.
 
 <a id="harness-hook-choice-invalid"></a>
 ### `gstack-harness: GSTACK_HARNESS_START_HOOK="<value>" is not on or off` (HARNESS_HOOK_CHOICE_INVALID)
@@ -6101,7 +7234,9 @@ Each harness profile has one start hook, owned by the gstack registration that w
 <a id="harness-hook-inactive"></a>
 ### `gstack-harness: <harness> start hook is written: <why>. Turn it on: <command>` (HARNESS_HOOK_INACTIVE, exit 4)
 
-The skills are registered and the start hook's files are in place, but the hook is not active in the harness. gstack turns the hook on through the harness's own CLI and then reads it back, so this means the CLI was not on `PATH`, one of its commands failed or timed out (the message quotes its last output), or the harness's settings block the plugin: OpenClaw's `plugins.allow` set without `gstack-start`, `gstack-start` in `plugins.deny`, or `hooks.allowPromptInjection: false`. gstack never edits your allow or deny lists. Run the printed command, then `gstack-harness status`; `--start-hook` again retries the whole step. `./setup --host` exits 4 for the same reason. Refreshes and upgrades retry on their own without failing, and stop once you disable the plugin in the harness.
+The skills are registered and the start hook's files are in place, but the hook is not active in the harness. gstack turns the hook on through the harness's own CLI and then reads it back, so this means the harness has no config yet (`no OpenClaw config at <path> yet` or `no Hermes config at <path> yet`: run `openclaw onboard` or `hermes setup` first, then `gstack-harness refresh`; gstack runs no harness command until then, because the CLI would create a config holding only gstack's plugin setting), the CLI was not on `PATH`, one of its commands failed or timed out (the message quotes its last output), or the harness's settings block the plugin: OpenClaw's `plugins.allow` set without `gstack-start`, `gstack-start` in `plugins.deny`, or `hooks.allowPromptInjection: false`. gstack never edits your allow or deny lists. Run the printed command, then `gstack-harness status`; `--start-hook` again retries the whole step. `./setup --host` exits 4 for the same reason. Refreshes and upgrades retry on their own without failing, and stop once you disable the plugin in the harness.
+
+The same code with `start hook is off: <why>` means you asked for the hook through `GSTACK_HARNESS_START_HOOK` or `harness_start_hook` but this registration cannot take it (a custom `--skills-dir`, `OPENCLAW_CONFIG_PATH` naming another config, or an unsafe plugin folder); the message names the fix.
 
 <a id="harness-qm-credentials"></a>
 ### `gstack-harness: no QM admin credential in the environment` / `... needs --yes` (HARNESS_QM_CREDENTIALS)
@@ -6121,7 +7256,7 @@ QM registration does not work yet. QM's skill-pack import clones the whole repos
 
 ## Module loadouts (gstack-modules)
 
-These codes come from `bin/gstack-modules` and `gen-skill-docs --loadout/--modules` (guide: [loadouts.md](loadouts.md)). Each one exits 2 before anything is written, and none falls back to the `full` loadout: an eval arm that silently rendered `full` would measure the control.
+These codes come from `bin/gstack-modules` and `gen-skill-docs --loadout/--modules` (guide: [loadouts.md](loadouts.md)). Each one exits 2 before anything is written, and none falls back to the `full` loadout: an eval arm that silently rendered `full` would measure the control. The exceptions are the install-time notices `LOADOUT_INVALID_MODEL`, `LOADOUT_MISMATCH` and `LOADOUT_FALLBACK` (from `bin/gstack-modules install`, the Capy installer and `gstack-skill-start`): an install never fails on them and serves `full` instead.
 
 <a id="loadouts-invalid"></a>
 ### `LOADOUTS_INVALID: modules/loadouts.json …`
@@ -6132,6 +7267,21 @@ These codes come from `bin/gstack-modules` and `gen-skill-docs --loadout/--modul
 ### `LOADOUT_UNKNOWN: "<name>" is not a loadout (valid: …)`
 
 **Meaning.** `--loadout` or the first token of `--modules` names no loadout in `modules/loadouts.json`. **Fix.** Use a name from the `valid:` list (`bin/gstack-modules list` prints them); `full` is always present.
+
+<a id="loadout-invalid-model"></a>
+### `LOADOUT_INVALID_MODEL: "<id>" is not a plain model id; using full`
+
+**Meaning.** The model id given to the installer (`--model`) or in `GSTACK_MODEL` is not a plain id after normalizing (lowercase letters, digits, `.`, `_` and `-`, at most 80 characters), so it never reaches a launch file or a start line. The full skills are served; nothing failed. **Fix.** Pass the model id as your model list names it, for example `--model claude-opus-5-5` or `--model anthropic/claude-opus-5-5` ([loadouts](loadouts.md#how-gstack-picks-a-loadout)).
+
+<a id="loadout-mismatch"></a>
+### `LOADOUT_MISMATCH: <baked id> vs <running id>: read <full root>/<skill>/SKILL.md now`
+
+**Meaning.** The skill you opened is the lite render made for one model, and `GSTACK_MODEL` says this session runs another. Lite is measured only on the baked model. **Fix.** Read the named full SKILL.md and follow it instead of the lite one. To stop it recurring, run the installer with this session's model (`scripts/install.sh --model <id>`) and read skills from the `SKILL_ROOT` it prints.
+
+<a id="loadout-fallback"></a>
+### `LOADOUT_FALLBACK: <reason>; serving full`
+
+**Meaning.** A lite tree could not be published (a render or dangling-reference failure, an unwritable state root, or a published folder whose files no longer match its `loadout.lock.json`), so the installer served the full skills and printed `SKILL_ROOT` for them. Nothing else changed. **Fix.** Fix the named reason; for a folder whose files changed, delete `<state root>/loadouts/<loadout>-<digest>` and rerun the installer, which publishes it again.
 
 <a id="module-spec-invalid"></a>
 ### `MODULE_SPEC_INVALID: …`
@@ -6162,3 +7312,133 @@ These codes come from `bin/gstack-modules` and `gen-skill-docs --loadout/--modul
 ### `RENDER_DEST_NOT_OWNED: <dir> exists and holds no loadout.lock.json`
 
 **Meaning.** `--out-dir` is a non-empty directory that an earlier `gstack-modules render` did not write, so replacing it could delete someone's files. **Fix.** Pass a new or empty directory, or the directory of an earlier render.
+
+## ubi-runner recovery and results sink
+
+These codes come from `scripts/ubicloud/ubi-runner.sh` (GST-1220). `RECOVERED`, `RECOVER_GONE` and `RECOVER_FAILED` lines go to stdout, one per bundle. Every `RECOVER_FAILED` keeps its bundle, so rerunning `recover` after the fix is always safe.
+
+<a id="ubi-recovery-required"></a>
+### `UBI_RECOVERY_REQUIRED`
+
+**Meaning.** A counted run (`--counted` or `UBI_COUNTED=1`) or `recover` needs a recovery directory, and neither `UBI_RECOVERY_DIR` nor `GSTACK_CAPY_RECOVERY_DIR` (nor `recover --dir`) names one. Nothing was created. A counted rerun also refuses with this code when it would reattach to a live VM whose bundle under the recovery directory is missing or doesn't open under this secret. **Fix.** Set `UBI_RECOVERY_DIR` to a directory another controller can read (on Capy, a drive folder), then rerun. For a VM without a bundle that opens, destroy it with the printed `down` command, then rerun.
+
+<a id="ubi-recovery-unavailable"></a>
+### `UBI_RECOVERY_UNAVAILABLE`
+
+**Meaning.** The bundle can't be written or opened: `openssl` is missing, there is no secret (`UBI_RECOVERY_KEY` or `UBICLOUD_API_KEY`), or the directory isn't writable. A counted run stops: before any create when the check runs up front, or through `up`'s teardown, which destroys the VM, when a later write fails. An uncounted run prints a warning and goes on without a bundle. **Fix.** Install openssl and make the directory writable, then rerun.
+
+<a id="recover-decrypt-failed"></a>
+### `RECOVER_FAILED: vm=<name> code=RECOVER_DECRYPT_FAILED`
+
+**Meaning.** The bundle didn't authenticate under this machine's secret, or it was sealed for a different VM name or owner than its file name and folder say, so no state was written. Either the secret differs from the creating controller's (another `UBI_RECOVERY_KEY`, or a different Ubicloud token), or the file was changed, renamed or moved. **Fix.** Set `UBI_RECOVERY_KEY` (or `UBICLOUD_API_KEY`) to the value the creating controller used and rerun `recover`. If the secret is right, treat the bundle as tampered and destroy the VM from the Ubicloud console instead.
+
+<a id="recover-api-unavailable"></a>
+### `RECOVER_FAILED: vm=<name> code=RECOVER_API_UNAVAILABLE`
+
+**Meaning.** The Ubicloud API answered something other than 200 or 404 for the VM, or the VM's create was sent less than `UBI_CREATE_GRACE` seconds ago and may still be in flight. No state was written. **Fix.** Rerun `recover` once the API answers, or after the grace period.
+
+<a id="recover-exists"></a>
+### `RECOVER_FAILED: vm=<name> code=RECOVER_EXISTS`
+
+**Meaning.** This machine already has state for the VM, and `recover` never overwrites it. **Fix.** Use that state (`pull`, `ssh`, `down <name>`). Remove the state directory only if you know it's stale.
+
+<a id="recover-gone"></a>
+### `RECOVER_GONE: vm=<name>`
+
+**Meaning.** The VM is confirmed gone, so its bundle was deleted. **Fix.** None. Its results are wherever its sink put them, if it had one.
+
+<a id="ubi-sink-invalid"></a>
+### `UBI_SINK_INVALID`
+
+**Meaning.** `--sink` or `UBI_SINK` names something other than `https-put:<presigned https URL>`. `file:<absolute dir>` works only with `UBI_SINK_ALLOW_FILE=1`, which is meant for tests, and there is no `git:` sink because it would put a repository credential on the VM. Nothing was created, and the line never prints the URL. **Fix.** Pass a presigned PUT URL for one object.
+
+<a id="sink-flush-failed"></a>
+### `SINK_FLUSH_FAILED: vm=<name> seq=<n> last_push=<epoch|never> [sink_skipped=size|tar_failed]`
+
+**Meaning.** `down` stopped the VM's pusher and ran one last push, and that push failed, took longer than 150 seconds, or was skipped because the results were over `UBI_SINK_MAX_MB` (`size`) or couldn't be read (`tar_failed`). A skipped snapshot is never uploaded, so the sink keeps the last good one. The VM was destroyed anyway, so the sink holds results only up to the push made at `last_push`. A `run` or `verify` of that VM exits 1 instead of 0. **Fix.** Treat the run's results as incomplete. Check that the presigned URL hasn't expired and still allows a PUT, then rerun. For a tiered `verify`, rerun with `--no-resume`: a plain rerun reuses the tiers that already passed under the same key, creates no VM and pushes nothing, so the sink would still hold the incomplete snapshot.
+
+<a id="ubi-create-unknown"></a>
+### `UBI_CREATE_UNKNOWN`
+
+**Meaning.** `up` or `run` sent a create that Ubicloud answered with a 5xx or not at all, and could not settle whether the VM is this call's: either the lookup by name never answered within `UBI_CREATE_GRACE` seconds, or a VM answers to the name but this call's ssh key did not open it within `UBI_SSH_WAIT` seconds. Another caller can take an explicit `-n` name between the name check and the create, so a VM found after an unanswered create is not destroyed until this call's key proves it is ours. The VM's record and recovery bundle stay, nothing destroys it, and `run` prints `left=unknown`. **Fix.** Run `scripts/ubicloud/ubi-runner.sh list` to see the VM and its owner. Run `down <name>` only when you know the VM is yours, because `down` destroys whatever answers to the name. This owner's reap destroys an unconfirmed VM once its `-t<hours>` TTL ends.
+
+<a id="ubi-attach-unknown"></a>
+### `UBI_ATTACH_UNKNOWN`
+
+**Meaning.** A rerun of `run` found a run record whose VM the Ubicloud API could not check (an answer other than 200 or 404), so it refused to start a second VM that would leave the first one billing. Nothing was created. **Fix.** Rerun once the API answers.
+
+## Per-repo cleanup (gstack-clean)
+
+These codes come from `bin/gstack-clean`, which reclaims old codex scratch in `<repo>/.gstack/tmp/`, browse logs over 1 MB and, with `--audit-days N`, old browse audit entries. It changes nothing unless you pass `--apply`, and `gstack-clean --help` lists what it touches.
+
+<a id="gstack-clean-usage"></a>
+### `gstack-clean: an unknown flag or a bad --audit-days value … (GSTACK_CLEAN_USAGE)`
+
+**Meaning.** A flag is not one of `--apply`, `--audit-days N`, `--json` or `--help`, or `--audit-days` got something other than a whole number of days from 1 to 99999. The line quotes the bad value and the last line is the usage line. Exit 2; nothing was read or changed. **Fix.** `gstack-clean --audit-days 30`, for example.
+
+<a id="gstack-clean-target-refused"></a>
+### `gstack-clean: the folder to clean is not a safe per-repo .gstack folder … (GSTACK_CLEAN_TARGET_REFUSED)`
+
+**Meaning.** gstack-clean only cleans `<git toplevel>/.gstack` for the directory you run it in. It refuses outside a git checkout, when `.gstack` is a symlink, when `BROWSE_STATE_FILE` points at a different folder's `browse.json`, and when the folder is, holds or sits inside the gstack state root (`~/.gstack` by default), where your learnings and settings live. Exit 3; nothing was touched. **Fix.** Run it from inside the repository, unset `BROWSE_STATE_FILE` (or point it at this repository's `.gstack/browse.json`), and replace a symlinked `.gstack` with a real folder.
+
+<a id="gstack-clean-partial"></a>
+### `FAILED <path> <errno>` … `(GSTACK_CLEAN_PARTIAL)`
+
+**Meaning.** One or more removals or cuts failed, usually `EACCES` or `EPERM` (a read-only file or folder) or `EBUSY` (another program holds the file). Every other action finished. Exit 1. **Fix.** Rerunning is safe: fix the permissions on each FAILED path, or wait for the program holding it to finish, then run `gstack-clean --apply` again.
+
+<a id="gstack-clean-internal"></a>
+### `gstack-clean: unexpected gstack-clean failure … (GSTACK_CLEAN_INTERNAL)`
+
+**Meaning.** gstack-clean hit an error it does not expect; the line names it. Exit 1. Changes made before the error stay made, and each was checked right before it was made. **Fix.** Rerun once; if it repeats, report the printed error to the gstack maintainers.
+
+<a id="runaway-usage"></a>
+### `RUNAWAY_USAGE: …` (gstack-runaway)
+
+**Meaning.** `gstack-runaway` got no command, an unknown one, both or neither of `--thread` and `--dir`, a flag with no value, an unparseable `--now`, or a path that does not exist. Exit 2; nothing was read. **Fix.** Run `gstack-runaway --help` and pass the files the /runaway-stopper fetch program wrote.
+
+<a id="runaway-input"></a>
+### `RUNAWAY_INPUT: file=<path> …` (gstack-runaway)
+
+**Meaning.** That thread's file is not valid JSON, or lacks `cost.tokens`, a parseable `created_at` or numeric `tasks[].cost.tokens`. The thread is skipped (never counted as OK), the rest of the sweep still runs, `SWEEP:` counts it as `unreadable`, and the exit is 1. **Fix.** Fetch that thread again with `tools.thread.get` (the whole object, not a summary) and rerun the scan.
+
+## Plain titles (gstack-plain-title)
+
+These codes come from `bin/gstack-plain-title`, which /ship, gstack-post and the "Plain title" CI check run so that PR titles, branch names, PR openings, changelog entries and commit subjects say in everyday words what changed. The rules are in [ship-policy.md](ship-policy.md#plain-titles); the word list is the repository's `.gstack/plain-titles.json`. Each finding prints as `PLAIN_TITLE: <CODE> <kind> "<match>" — <hint>`, naming only the matched words, never the whole title or body.
+
+<a id="plain-title-refused"></a>
+### `PLAIN_TITLE: PLAIN_TITLE_REFUSED <kind> "<match>" — …`
+
+**Meaning.** The front of the PR title (everything before one optional trailing group of references such as `(GST-1713)` or `(#4122)`) holds a tracker code, a word from the policy's `terms` list, or a `word(scope):` prefix. Exit 1; gstack-post posts nothing, and the CI check fails. **Fix.** Rewrite the title as a plain sentence about what changed for someone using the project, for example "Stop gstack from hitting GitHub's rate limit while it waits on PRs (GST-1713)". Editing the title reruns the CI check.
+
+<a id="plain-branch-refused"></a>
+### `PLAIN_TITLE: PLAIN_BRANCH_REFUSED <kind> "<match>" — …`
+
+**Meaning.** The branch name holds a tracker code or a listed word before its last segment. Hyphens and underscores count as spaces, one tracker code at the very end is fine (`capy/github-rate-limit-gst-1713`), and branches gstack generates (`release/`, `wave/`, `gstack-land-repair/`) are exempt. /ship refuses it before the first push; CI only warns, since a pushed branch cannot be renamed in place. **Fix.** Name the next branch in plain words; for this one, open a new branch only if the PR has not been pushed yet.
+
+<a id="plain-opening-refused"></a>
+### `PLAIN_TITLE: PLAIN_OPENING_REFUSED <kind> "<match>" — …`
+
+**Meaning.** The readable part of the PR body (everything above the `<!-- gstack:agent-notes -->` marker) does not start with a plain paragraph: it starts with a heading, code block, list, table, HTML or image, runs past two sentences, or names a tracker code or listed word. /ship refuses it; CI only warns. **Fix.** Start the body with one or two sentences saying what changed and which goal of the project it serves. Move codes and records into the Agent notes section at the end.
+
+<a id="plain-changelog-refused"></a>
+### `PLAIN_TITLE: PLAIN_CHANGELOG_REFUSED <kind> "<match>" — …`
+
+**Meaning.** The changelog entry holds a tracker code, or its bold lead holds a listed word. Code spans, code blocks, links and quoted words are skipped. **Fix.** Drop tracker codes from the entry and rewrite the bold lead in everyday words.
+
+<a id="plain-commit-refused"></a>
+### `PLAIN_TITLE: PLAIN_COMMIT_REFUSED <kind> "<match>" — … (warning only)`
+
+**Meaning.** A commit subject on the PR breaks the title rule. This is always a warning: the squash commit on main takes the PR title, which the title check already guards. **Fix.** Write later commit subjects as plain sentences; nothing needs rewriting now.
+
+<a id="plain-policy-invalid"></a>
+### `gstack-plain-title: .gstack/plain-titles.json is not valid JSON or breaks the schema … (PLAIN_POLICY_INVALID)`
+
+**Meaning.** The policy file does not parse, has an unknown key, a `codes` entry that is not a valid regex or matches empty text, an `allow` entry without a reason, or a `since` that is not a date. Exit 3; nothing was checked. **Fix.** Fix the key the line names, then run `gstack-plain-title validate`.
+
+<a id="docs-only-error"></a>
+### `DOCS_ONLY: error (DOCS_ONLY_ERROR: git … ; fix: …)`
+
+**Meaning.** `gstack-docs-only` could not read the change. Usually a ref is missing: CI checked out one
+commit, or `origin/<base>` was never fetched. It exits 2, writes `docs_only=false`, and every caller runs
+the full suites. **Fix.** Fetch both commits (`actions/checkout` with `fetch-depth: 2` on the merge ref, or
+`git fetch origin <base>`), then rerun. See [pregate.md](pregate.md#docs-only).
