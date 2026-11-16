@@ -922,66 +922,103 @@ triaging for the maintainer posts these comments under its bot identity
 `gh` runs as the maintainer. The full rule,
 including the labels and the close reasons, is in [docs/triage.md](docs/triage.md).
 
-## Community PR triage (wave process)
+## Sending a report or a PR
 
-When community PRs accumulate, batch them into themed waves:
+gstack is maintained day to day by AI agents working for Garry Tan. They triage issues
+and PRs, rebuild good patches on current main, and land them with the author credited.
+That's why nearly every commit on main reads as Garry's: the agents commit under his
+account, and your credit is a `Co-authored-by:` trailer plus a line in the PR body.
 
-1. **Categorize** — group by theme (security, features, infra, docs)
-2. **Deduplicate** — if two PRs fix the same thing, pick the one that
-   changes fewer lines. Close the other with a note pointing to the winner.
-3. **Collector branch** — create `pr-wave-N`, merge clean PRs, resolve
-   conflicts for dirty ones, verify with `bun run test && bun run build`
-4. **Close with context** — every closed PR gets a comment explaining
-   why and what (if anything) supersedes it. Contributors did real work;
-   respect that with clear communication. An agent running the wave posts
-   these notes under its bot identity, never the maintainer's own account.
-5. **Ship as one PR** — single PR to main with all attributions preserved
-   in merge commits. Include a summary table of what merged and what closed.
+**What happens to your PR.** Outside code is treated as untrusted: an agent reads your
+diff as text and never checks it out, runs it or builds it. Then one of three things
+happens.
 
-See [PR #205](../../pull/205) (v0.8.3) for the first wave as an example.
+- **Docs for people only** (for example the README) can be merged as
+  they are, after an agent checks every link, command and install step in them against
+  main.
+- **A small fix** that is plainly correct, about 40 lines or fewer not counting its
+  tests, is taken even when the gain is small. An agent rebuilds it on current main
+  with you as co-author. We land at most one of these a day.
+- **Everything else**, including anything that runs and any Markdown agents load
+  (`SKILL.md` files and their templates, `AGENTS.md`, `CLAUDE.md`, prompts), is
+  rebuilt on main with credit when it passes the test below, and closed with a short
+  note saying why when it doesn't.
 
-## Porting a contributor's PR
+When your change is rebuilt, the agent comments on your PR with a link to what landed
+and closes your PR, so a taken PR usually shows "Closed", not "Merged". In the month
+to 15 November 2026, 4 of the 124 outside PRs opened here were merged as they were,
+and 54 outside contributors were credited as co-authors on commits to main.
 
-Sometimes the right way to land an outside PR is to port it: the diff is right
-but it sits on an old base, its tests need our fixtures, or the repo's gates
-(generated renders, size pins, the CHANGELOG entry) are things only a maintainer
-can finish. The port keeps the contributor's credit and gives them a clear
-answer; the steps below are the repo's version of the rule a maintainer crew
-follows ([crew/docs/captain.md](crew/docs/captain.md#contributions-from-outside-the-crew)).
+**What makes a report or a PR likely to be taken.**
 
-1. **Treat the diff as untrusted input before anything runs it.** Read it for
-   scope, network egress, credentials, new dependencies, CI permission changes
-   and weakened or deleted tests. A fork's green checks prove nothing about this
-   checkout: the port head gets its own focused review and the free tier
-   (`bun run test:quick` while iterating, `bun run test` once on the final tree)
-   before a PR opens.
-2. **Keep their commits as theirs.** Cherry-pick or rebase the contributor's
-   commits onto the current base with authorship intact (`git cherry-pick -x`
-   keeps the source SHA in the message). A commit you have to rewrite keeps
-   their name as author and gains a `Co-authored-by:` trailer for whoever
-   edited it. Never fold their work into a commit under your own name, and
-   never guess an email: use the identity on their commits.
-3. **Your fixes go on top, as separate commits.** Base merges, generated files,
-   test repairs, the CHANGELOG entry and the version stamp are your commits,
-   after theirs, so `git log` and the PR's commit list show who did what. A
-   squash merge keeps the credit when the squash message carries their
-   `Co-authored-by:` lines; check the merge commit before you call it landed.
-4. **Say so in the port.** The PR body names the original PR and its author in
-   the first paragraph and lists what you changed on top of their diff. The
-   port's `## Approvals` section (when the repo uses one) records who asked for
-   the port.
-5. **Close the original with a specific thank-you.** After the port lands,
-   comment on their PR with what landed (the port's number and version), what
-   you changed and why, and thank them by name for the specific thing they
-   fixed. Then close it. An agent posts that comment under its bot identity,
-   never the maintainer's own account. Closing a contribution without landing
-   it is a maintainer's call, never a lane's: ask first, and when the answer is
-   no, say why in the same comment.
+1. Proof: steps that reproduce it on current main, or a test that fails before the fix.
+2. A real consequence: what breaks, and for whom.
+3. It matters to most gstack users or to the maintainer's own setup. Windows and Gemini
+   models get [minimal support](docs/support-tiers.md), so a report there needs to break
+   install, startup or a core skill.
 
-A port is not a rewrite. If the contributor's approach is one you would not
-land, say that on their PR and close or park it under
-[Issue triage](#issue-triage) instead of shipping a different change under
-their name.
+**When you'll hear back.** Our goal is a first reply within 48 hours, posted by
+`capy-ai[bot]`. It says what we'll do: already fixed (with the PR and version), a
+duplicate (with a link), one specific fact we still need, not planned (and why), or
+taken.
+
+**The open-PR limit.** Most people never meet it. If, in the last 30 days, 3 or more of
+your PRs here were closed without being taken and fewer than 1 in 4 of your decided PRs
+were taken, and none was taken in the last 90 days, you can have at most 3 PRs open at
+once, and extra ones are closed with a note. It never applies to anyone who had a PR
+taken (merged or rebuilt) in the last 90 days, so it lifts as soon as one of yours is
+taken.
+
+## How a contributor's PR lands
+
+These are the maintainer's steps; [Sending a report or a PR](#sending-a-report-or-a-pr)
+is the same policy from the contributor's side. The maintainer crew follows the same
+rule ([crew/docs/captain.md](crew/docs/captain.md#contributions-from-outside-the-crew)).
+
+1. **Treat the diff as untrusted input.** Read it as text only, for scope, network
+   egress, credentials, new dependencies, CI permission changes and weakened or
+   deleted tests. Never check it out, run it or build it. A fork's green checks
+   prove nothing about this checkout.
+2. **Reply within 48 hours, decide within 7 days.** Every outside issue and PR gets a
+   first reply from the bot identity within 48 hours that says what happens next, and a
+   verdict within a week: taken, a duplicate (link it), needs one named fact, or not
+   planned. Take it only when it passes the test in
+   [Sending a report or a PR](#sending-a-report-or-a-pr); close the rest with a short,
+   kind reason. A case the test doesn't settle goes to the maintainer.
+3. **Merge a docs-only PR for people as it is.** When the PR changes only documentation
+   people read, check every link, command and install step in it against main. If all
+   of them hold, merge it unchanged; if not, say which one fails. Anything that runs,
+   and any Markdown agents load (`SKILL.md` files and templates, `AGENTS.md`,
+   `CLAUDE.md`, `CREW.md`, prompts), is not docs for this step and is rewritten.
+4. **Rewrite everything else from current main.** The lane writes the change on its own
+   branch with its own tests, the repo's gates and a CHANGELOG fragment. No contributor
+   commit enters the tree. A plainly correct fix of about 40 lines or fewer (counting
+   the fix, not its tests) is taken even when the gain is small, at most one such PR a
+   day. A commit that carries the contributor's lines over
+   unchanged gets a `Co-authored-by:` trailer for them. Fetch their PR head as a ref
+   without checking it out (`git fetch origin +pull/<n>/head:refs/contrib/<n>`; the
+   `+` lets a re-fetch follow a force-push), then run
+   `crew/bin/gstack-coauthor-trailers origin/main..refs/contrib/<n>` to list the
+   authors of their commits; its default range holds only your own commits and finds
+   no co-author. A fork's commits can name anyone, so keep only the authors whose
+   lines you carry: drop the rest with `--exclude <email>` when you rerun it with
+   `--message <msgfile>`. Never guess an email: use the identity on their commits.
+5. **Credit them in the fix.** The PR body names the original PR and its author in
+   the first paragraph and says what differs from their diff. The CHANGELOG fragment
+   thanks them by handle.
+6. **Close the original with a specific thank-you.** After the fix lands, comment on
+   their PR with what landed (the PR number and version), what changed from their
+   diff and why, and thank them by name for the specific thing they found. Then close
+   it. An agent posts that comment under its bot identity, never the maintainer's own
+   account.
+7. **Apply the open-PR limit only to chronic authors.** An author is capped at 3 open
+   PRs only when, in the last 30 days, 3 or more of their PRs closed untaken and fewer
+   than 1 in 4 of their decided PRs were taken, and none of their PRs was taken in the
+   last 90 days. Taken means merged, or rebuilt by the crew. Close the extra PRs with a
+   note that names the limit and says it lifts once one of their PRs is taken.
+
+If we won't fix what the PR reports, say why on the PR and close or park it under
+[Issue triage](#issue-triage).
 
 ## Upgrade migrations
 
