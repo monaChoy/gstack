@@ -9,7 +9,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { buildRow, locate, type ApprovalRow } from '../lib/approval-record';
-import { exemptReason, finishPlan, landPlan, parsePlanLine, planMode, planRecordId, publicPlanLine, readyPlan, resolvePlan } from '../lib/plan-record';
+import { exemptReason, finishPlan, finishPlanLine, landPlan, parsePlanLine, planMode, planRecordId, publicPlanLine, readyPlan, recordFinishPlan, resolvePlan } from '../lib/plan-record';
 import { planBinding } from '../lib/ship-audit';
 import { loadReady, persist, repoIdentity } from '../crew/lib/ship-queue-train-record';
 
@@ -407,3 +407,50 @@ describe('public repos: the record-keyed Plan line and the machine-local key (GS
     expect(config('get', 'plan_record').stdout.trim()).toBe('warn');
   });
 });
+
+describe('bug-fix exemption wording and the plan finish recorded (GSTA-649, GSTA-617)', () => {
+  // Value: protects=a stated bug-fix exemption resolves whatever its wording, and a PR whose body has no Plan line takes the line
+  //   /ship finish resolved on this checkout, which land then accepts; fails_when=ready warns PLAN_EXEMPT_UNKNOWN or
+  //   PLAN_RECORD_MISSING after finish recorded Plan: exempt: bug fix; seam=exemptReason, finishPlan, readyPlan, landPlan
+  test('bug fix variants are the bug fix exemption', () => {
+    for (const r of ['bug fix with failing-first tests', 'Bugfix', 'bug-fix: retry backoff', 'bug fixes (R65)']) expect(exemptReason(r)).toBe('bug fix');
+    expect(exemptReason('bugfixing everything')).toBeNull();
+  });
+  // Value: protects=the READY note, which rides a public notes ref, never carries finish's raw --plan text: an approved line keeps only
+  //   the opaque record id, an exempt line only its listed reason; fails_when=a local run path, a row id or a note in parentheses
+  //   reaches the note's plan record; why_new=#4529 final review (GST-1955 family); seam=readyPlan's finish fallback, landPlan
+  test('the plan record finish supplies is redacted before it reaches the READY note (#4529)', () => {
+    const f = fixture({ y: [{ ask: 'R41 A1: cut a skill' }] });
+    const env = { ...f.env, GSTACK_PLAN_RECORD: 'require' };
+    const rowId = f.ids['R41 A1: cut a skill']!;
+    const approved = readyPlan({ cwd: f.cwd, env, body: 'Fixes a thing.', changed: ['lib/x.ts'], finishLine: `Plan: approved: ${rowId}` });
+    expect(approved.record).toMatchObject({ line: `Plan: approved (record ${planRecordId(rowId)})`, ref: planRecordId(rowId), state: 'approved', from: 'finish' });
+    expect(JSON.stringify(approved.record)).not.toContain(rowId);
+    expect(landPlan({ env, record: approved.record, body: 'Fixes a thing.' }).failure).toBeUndefined();
+    const exempt = readyPlan({ cwd: f.cwd, env, body: 'Fixes a thing.', changed: ['lib/x.ts'], finishLine: 'Plan: exempt: bug fix (see /home/user/.capy/work/ship-4529/run)' });
+    expect(exempt.record).toMatchObject({ line: 'Plan: exempt: bug fix', reason: 'bug fix', from: 'finish' });
+    expect(JSON.stringify(exempt.record)).not.toContain('/home/user');
+    const own = readyPlan({ cwd: f.cwd, env, body: `Plan: approved: ${rowId}`, changed: ['lib/x.ts'] });
+    expect(own.record).toMatchObject({ line: `Plan: approved: ${rowId}`, row_id: rowId });
+  });
+  test('ready reads the Plan line finish resolved when the body has none, and land accepts it', () => {
+    const f = fixture();
+    const env = { ...f.env, GSTACK_PLAN_RECORD: 'require' };
+    spawnSync('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.com', 'commit', '-q', '--allow-empty', '-m', 'seed'], { cwd: f.cwd, timeout: 30_000 });
+    const head = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: f.cwd, encoding: 'utf8', timeout: 30_000 }).stdout.trim();
+    const fin = finishPlan(f.cwd, 'main', 'Plan: exempt: bug fix', env);
+    expect(fin.line).toBe('PLAN: exempt bug fix');
+    recordFinishPlan(f.cwd, fin.record);
+    const ready = readyPlan({ cwd: f.cwd, env, body: 'Fixes a thing.', changed: ['lib/x.ts'], finishLine: finishPlanLine(f.cwd, 'capy/feature', head) });
+    expect(ready.failure).toBeUndefined();
+    expect(ready.record).toMatchObject({ line: 'Plan: exempt: bug fix', state: 'exempt', reason: 'bug fix', from: 'finish' });
+    expect(ready.line).toContain("from /ship finish's plan record");
+    expect(landPlan({ env, record: ready.record, body: 'Fixes a thing.' }).failure).toBeUndefined();
+    expect(finishPlanLine(f.cwd, 'other-branch', head)).toBeUndefined();
+    expect(finishPlanLine(f.cwd, 'capy/feature', '0'.repeat(40))).toBeUndefined();
+    expect(readyPlan({ cwd: f.cwd, env, body: 'Plan: exempt: flaky', changed: ['lib/x.ts'], finishLine: finishPlanLine(f.cwd, 'capy/feature', head) }).record).toMatchObject({ reason: 'flaky' });
+    recordFinishPlan(f.cwd, undefined);
+    expect(finishPlanLine(f.cwd, 'capy/feature', head)).toBeUndefined();
+  });
+});
+
